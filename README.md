@@ -392,6 +392,13 @@ TURSO_AUTH_TOKEN
 JWT_SECRET
 ```
 
+GitHub Actions deployment also requires these repository secrets:
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
 Deploy from terminal:
 
 ```bash

@@ -21,7 +21,7 @@ secrets and are never shipped in the app.
 1. Create a Turso database.
 2. Apply `schema.sql`.
 3. Review `wrangler.toml` and adjust the Worker name if needed.
-4. Add secrets:
+4. Add Worker runtime secrets from your local terminal:
 
 ```bash
 wrangler secret put TURSO_DATABASE_URL
@@ -29,7 +29,17 @@ wrangler secret put TURSO_AUTH_TOKEN
 wrangler secret put JWT_SECRET
 ```
 
-5. Deploy:
+5. For GitHub Actions deployment, add repository secrets in GitHub:
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+Create them in repo Settings > Secrets and variables > Actions. The API token
+must have permission to edit/deploy Workers on the target Cloudflare account.
+
+6. Deploy:
 
 ```bash
 npm install
