@@ -1,0 +1,13 @@
+name = "koinly-sync-worker"
+main = "src/index.ts"
+compatibility_date = "2026-08-21"
+
+[vars]
+ACCESS_TOKEN_TTL_SECONDS = "900"
+REFRESH_TOKEN_TTL_SECONDS = "2592000"
+MAX_SYNC_BATCH_SIZE = "100"
+
+# Set these as Cloudflare Worker secrets, not committed vars:
+# wrangler secret put TURSO_DATABASE_URL
+# wrangler secret put TURSO_AUTH_TOKEN
+# wrangler secret put JWT_SECRET

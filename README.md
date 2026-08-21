@@ -1,6 +1,6 @@
 # Koinly Flutter
 
-A local-first personal finance tracker built in Flutter with a polished Material 3 mobile and desktop UI. Koinly helps users manage accounts, transactions, categories, budgets, loans, savings, reminders, reports, exports, local backups, and optional online sync from one Android or Windows app.
+A local-first personal finance tracker built in Flutter with a polished Material 3 mobile and desktop UI. Koinly helps users manage accounts, transactions, categories, budgets, loans, savings, reminders, reports, exports, and local backups from one Android or Windows app.
 
 ![Koinly banner](assets/images/koinly-banner.png)
 
@@ -26,10 +26,10 @@ A local-first personal finance tracker built in Flutter with a polished Material
 | Local database | SQLite via `sqflite` and desktop SQLite FFI |
 | State management | `provider` + `ChangeNotifier` |
 | Analytics/crash reporting | Firebase Analytics + Crashlytics with optional initialization |
-| Online sync | Optional cloud/database sync |
-| Visible sync database | MongoDB Database |
-| Hidden/internal providers | Local, Turso, Cloudflare D1, Supabase, Neon, Firebase Firestore placeholders |
-| Admin approval | Admin approval flow with Telegram contact |
+| Online sync | Account-based automatic multi-device sync |
+| Sync backend | Cloudflare Worker API |
+| Cloud database | Turso, accessed only by the Worker |
+| Local sync state | SQLite outbox, cursor, entity versions, and conflict records |
 | Backup/restore | Local `.koinlybackup` files |
 | CI build | GitHub Actions for Android APKs and Windows installer |
 | Android outputs | Universal, ARM32, ARM64 release APKs |
@@ -55,8 +55,7 @@ Added for the current app:
 - Material 3 Expressive UI behavior
 - Hidden Settings naming
 - single-toggle category and loan filters
-- MongoDB-only visible sync configuration
-- current Sync and Download Data behavior
+- account-based automatic multi-device sync
 - Financial Health Summary popup behavior
 - daily 10 Savings Account suggestion bubbles
 - loan repayment reminders and budget alert summary behavior
@@ -134,74 +133,37 @@ Settings includes theme, currency, currency symbol/code, prefix/suffix placement
 
 ### Hidden Settings
 
-Hidden Settings keeps secondary controls away from the main workflow. Examples include defaults, reorder tools, backup tools, lock/security options, and online sync advanced options.
+Hidden Settings keeps secondary controls away from the main workflow. Examples include defaults, reorder tools, backup tools, and lock/security options.
 
 ---
 
 ## Online data sync
 
-Online sync is optional. The app remains local-first.
+Koinly now uses account-based, local-first online sync.
 
-### Visible database provider
+The active user flow is:
 
-Only this provider is visible to normal users:
+1. Open Settings.
+2. Open Account & sync.
+3. Enter the Cloudflare Worker URL.
+4. Create an account or sign in.
+5. Continue using Koinly normally.
 
-```text
-MongoDB Database
-```
+Normal app operations save to local SQLite first, update the UI immediately, and add an operation to the local `sync_outbox`. The background coordinator batches pending operations, pushes them to the Worker, pulls remote changes by server cursor, and applies them locally.
 
-### MongoDB configuration
-
-The visible MongoDB provider asks for:
-
-```text
-MongoDB URL
-```
-
-Extra database and collection fields are hidden from regular users.
-
-### Hidden/internal providers
-
-The code keeps placeholders for Local Database, Turso Database, Cloudflare D1, Supabase Postgres, Neon Postgres, and Firebase Firestore. These are not part of the normal visible workflow right now.
-
-### Current sync buttons
-
-| Button | Behavior |
-| --- | --- |
-| Sync | Downloads/restores the latest data from the configured database/cloud target to this device |
-| Upload Data | Uploads this device’s local data to the configured database/cloud target |
-| Download Data | Renamed to Upload Data |
-| Download cloud data to this device | Removed |
-
-### Automatic sync
-
-Automatic sync is enabled when a database is configured. The app silently retries when internet returns. Admin approval is respected. Sync errors are shown through app status messages where needed.
-
-### Admin approval
-
-New Sync IDs require admin approval. If approval is missing, the app shows an activation/admin message and a Telegram contact button. Approved users can sync. Rejected or blocked users cannot sync.
+No Turso database token is stored in Flutter. The app talks to:
 
 ```text
-https://t.me/Ch0wdhury_Siam
+Koinly Flutter -> Cloudflare Worker -> Turso
 ```
 
-### Sync backend URL
-
-The Worker URL is injected at build time:
-
-```bash
---dart-define=KOINLY_SYNC_API_BASE_URL=https://your-worker-url.workers.dev
-```
-
-GitHub Actions can read it from the manual workflow input `sync_api_base_url`, repository variable `KOINLY_SYNC_API_BASE_URL`, or repository secret `KOINLY_SYNC_API_BASE_URL`.
-
-If empty, the app still builds, but online sync shows a backend URL configuration error until rebuilt with the Worker URL.
+The older manual snapshot-style sync code and `backend/cloudflare-turso/` reference backend are retained as legacy reference material, but Account & sync is the normal multi-device path.
 
 ---
 
 ## Backup and restore
 
-Backup files use `.koinlybackup`. Backup includes local app data and preferences. Restore replaces local data with backup contents. Backup/restore works separately from online sync. Local-only use does not require a sync account.
+Backup files use `.koinlybackup`. Backup includes local app data and preferences. Restore replaces local data with backup contents. Local-only use does not require a sync account.
 
 ---
 
@@ -240,8 +202,8 @@ Backup files use `.koinlybackup`. Backup includes local app data and preferences
 | Notifications | `flutter_local_notifications` |
 | Time zones | `timezone` |
 | Firebase | Analytics + Crashlytics |
-| HTTP | `http` |
-| MongoDB | `mongo_dart` |
+| HTTP | `http` for Worker API sync |
+| MongoDB | `mongo_dart` retained for legacy sync code |
 | IDs | `uuid` |
 
 ---
@@ -276,7 +238,7 @@ The app is currently implemented mainly in `lib/main.dart`. GitHub Actions can r
 
 ## Data model overview
 
-The app stores local data for accounts, categories, transactions, budgets, loans, repayments, loan repayment reminders, savings suggestion profile, daily savings suggestion seen status, settings/preferences, sync configuration, and backup metadata.
+The app stores local data for accounts, categories, transactions, budgets, loans, repayments, loan repayment reminders, savings suggestion profile, daily savings suggestion seen status, settings/preferences, backup metadata, and sync metadata.
 
 Important classification fields include transaction type, account IDs, category ID, loan metadata, transfer target, created date/time, reminder status, and budget scope.
 
@@ -324,22 +286,19 @@ flutter run -d windows
 Build universal APK:
 
 ```bash
-flutter build apk --release \
-  --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-worker-url.workers.dev
+flutter build apk --release
 ```
 
 Build ARM32/ARM64 APKs:
 
 ```bash
-flutter build apk --release --split-per-abi \
-  --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-worker-url.workers.dev
+flutter build apk --release --split-per-abi
 ```
 
 Build Windows release:
 
 ```bash
-flutter build windows --release \
-  --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-worker-url.workers.dev
+flutter build windows --release
 ```
 
 ---
@@ -407,64 +366,58 @@ If Windows signing is not configured, the installer still builds, but Windows ma
 
 ## Cloudflare + Turso backend
 
-Backend folder:
+Active sync Worker folder:
 
 ```text
-backend/cloudflare-turso/
+cloud/worker/
 ```
 
-It contains Worker source, schema, package configuration, and deployment reference files.
+It contains the Cloudflare Worker API, Turso schema, package configuration, and deployment reference files.
 
 Backend files:
 
 ```text
-backend/cloudflare-turso/src/index.js
-backend/cloudflare-turso/schema.sql
-backend/cloudflare-turso/package.json
-backend/cloudflare-turso/wrangler.toml.example
+cloud/worker/src/index.ts
+cloud/worker/schema.sql
+cloud/worker/package.json
+cloud/worker/wrangler.toml.example
 ```
 
 Typical Worker secrets:
 
 ```text
-ADMIN_KEY
 TURSO_DATABASE_URL
 TURSO_AUTH_TOKEN
+JWT_SECRET
 ```
 
 Deploy from terminal:
 
 ```bash
-cd backend/cloudflare-turso
+cd cloud/worker
 npm install
 npx wrangler deploy
 ```
 
-After deployment, rebuild the app with:
-
-```bash
---dart-define=KOINLY_SYNC_API_BASE_URL=https://your-worker-url.workers.dev
-```
+Apply `cloud/worker/schema.sql` to Turso before using the Worker. The Flutter app needs only the deployed Worker URL in Settings > Account & sync.
 
 ---
 
-## Admin panel
+## Legacy sync backend
 
-The backend includes admin approval tools. Admin actions include login with `ADMIN_KEY`, view pending Sync IDs, approve users, reject users, block users, and inspect sync status.
+The old `backend/cloudflare-turso/` snapshot/admin-approval backend is retained as reference material. It is not the normal multi-device sync path.
 
 ---
 
 ## Online sync user flow
 
-1. User opens Online Data Sync.
-2. User configures Sync ID/PIN where required.
-3. User configures the visible database provider.
-4. User taps Upload Data to upload local data.
-5. User taps Sync to download/restore database data.
-6. If approval is missing, the app asks the user to contact admin.
-7. Admin approves the Sync ID.
-8. User can upload data with Upload Data and restore data with Sync.
-9. Automatic sync retries silently when internet returns.
+1. User opens Account & sync.
+2. User enters the Worker URL.
+3. User creates an account or signs in.
+4. Existing local data is adopted into the account through the outbox.
+5. Local changes are saved immediately and synced automatically in the background.
+6. Other signed-in devices pull changes by cursor and update their local SQLite database.
+7. A manual Sync now action remains available for troubleshooting.
 
 ---
 
@@ -473,30 +426,22 @@ The backend includes admin approval tools. Admin actions include login with `ADM
 Backend endpoint definitions are in:
 
 ```text
-backend/cloudflare-turso/src/index.js
+cloud/worker/src/index.ts
 ```
 
-Endpoint groups may include health/status, sync upload, sync download, approval status, admin login, and approve/reject/block actions.
+Endpoint groups include auth registration/login/refresh/logout, initial sync, push, pull, and status.
 
 ---
 
 ## Troubleshooting
 
-### `KOINLY_SYNC_API_BASE_URL is empty`
+### Account & sync cannot connect
 
-This is a build warning, not a build failure. The app builds, but online sync will not work until rebuilt with a Worker URL.
+Check the Worker URL, Turso secrets, `JWT_SECRET`, and whether `cloud/worker/schema.sql` has been applied.
 
-### `Cloud sync backend URL is not configured in this app`
+### Sync conflict appears
 
-Rebuild with:
-
-```bash
---dart-define=KOINLY_SYNC_API_BASE_URL=https://your-worker-url.workers.dev
-```
-
-### User sees admin activation message
-
-The Sync ID is not approved. Approve it from the admin panel.
+Koinly records stale-version conflicts locally instead of silently overwriting financial data. Use the newest synced device data as the source of truth before retrying a conflicting local edit.
 
 ### Admin panel says unauthorized
 

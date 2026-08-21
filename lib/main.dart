@@ -1041,6 +1041,48 @@ class KoinlyDatabase {
         updated_on INTEGER NOT NULL
       )
     ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS sync_state(
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS sync_outbox(
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        payload_json TEXT,
+        base_version INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at INTEGER,
+        last_error TEXT
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS sync_entity_versions(
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(entity_type, entity_id)
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS sync_conflicts(
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        local_operation_id TEXT,
+        server_version INTEGER NOT NULL DEFAULT 0,
+        details TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      )
+    ''');
+    await database.execute('CREATE INDEX IF NOT EXISTS idx_sync_outbox_created ON sync_outbox(created_at)');
+    await database.execute('CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open ON sync_conflicts(resolved_at, created_at)');
   }
 
   Future<void> _migrateLoanAccountSelection(sql.Database database) async {
@@ -1453,6 +1495,218 @@ class KoinlyDatabase {
     });
     await _migrateLoanAccountSelection(database);
   }
+
+  static const syncTables = [
+    'accounts',
+    'categories',
+    'transactions',
+    'budgets',
+    'budget_accounts',
+    'budget_categories',
+    'loans',
+    'loan_repayments',
+    'loan_repayment_reminders',
+  ];
+
+  Future<String> readSyncState(String key, [String fallback = '']) async {
+    final rows = await (await db).query('sync_state', columns: ['value'], where: 'key = ?', whereArgs: [key], limit: 1);
+    return rows.isEmpty ? fallback : rows.first['value'] as String? ?? fallback;
+  }
+
+  Future<void> writeSyncState(String key, String value) async {
+    await (await db).insert('sync_state', {'key': key, 'value': value}, conflictAlgorithm: sql.ConflictAlgorithm.replace);
+  }
+
+  Future<int> localEntityVersion(String entityType, String entityId) async {
+    final rows = await (await db).query('sync_entity_versions', columns: ['version'], where: 'entity_type = ? AND entity_id = ?', whereArgs: [entityType, entityId], limit: 1);
+    return rows.isEmpty ? 0 : (rows.first['version'] as num? ?? 0).toInt();
+  }
+
+  Future<void> saveEntityVersion(String entityType, String entityId, int version) async {
+    await (await db).insert(
+      'sync_entity_versions',
+      {'entity_type': entityType, 'entity_id': entityId, 'version': version},
+      conflictAlgorithm: sql.ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> enqueueTableRow(String table, String entityId, {String operation = 'upsert'}) async {
+    if (!syncTables.contains(table)) return;
+    Map<String, Object?>? payload;
+    if (operation != 'delete') {
+      final rows = await (await db).query(table, where: _whereForEntity(table), whereArgs: _whereArgsForEntity(table, entityId), limit: 1);
+      if (rows.isEmpty) return;
+      payload = rows.first;
+    }
+    await enqueueSyncOperation(entityType: table, entityId: entityId, operation: operation, payload: payload);
+  }
+
+  Future<void> enqueueRowsForTable(String table, {String? budgetId}) async {
+    if (!syncTables.contains(table)) return;
+    final rows = await (await db).query(table, where: budgetId == null ? null : 'budget_id = ?', whereArgs: budgetId == null ? null : [budgetId]);
+    for (final row in rows) {
+      final entityId = _entityIdForRow(table, row);
+      if (entityId.isNotEmpty) {
+        await enqueueSyncOperation(entityType: table, entityId: entityId, operation: 'upsert', payload: row);
+      }
+    }
+  }
+
+  Future<void> enqueueDelete(String table, String entityId) async {
+    await enqueueSyncOperation(entityType: table, entityId: entityId, operation: 'delete', payload: null);
+  }
+
+  Future<void> enqueuePreferences(Map<String, dynamic> preferences) async {
+    await enqueueSyncOperation(entityType: 'preferences', entityId: 'koinly', operation: 'upsert', payload: preferences);
+  }
+
+  Future<void> enqueueAllForAdoption(Map<String, dynamic> preferences) async {
+    for (final table in syncTables) {
+      await enqueueRowsForTable(table);
+    }
+    await enqueuePreferences(preferences);
+  }
+
+  Future<void> enqueueSyncOperation({
+    required String entityType,
+    required String entityId,
+    required String operation,
+    required Map<String, Object?>? payload,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final id = _uuid.v4();
+    await (await db).insert('sync_outbox', {
+      'id': id,
+      'entity_type': entityType,
+      'entity_id': entityId,
+      'operation': operation,
+      'payload_json': payload == null ? null : jsonEncode(payload),
+      'base_version': await localEntityVersion(entityType, entityId),
+      'created_at': now,
+    });
+  }
+
+  Future<List<Map<String, Object?>>> pendingSyncOperations({int limit = 50}) async {
+    return (await db).query('sync_outbox', orderBy: 'created_at ASC', limit: limit);
+  }
+
+  Future<void> markOutboxUploaded(List<String> operationIds, Map<String, int> versionsByOperationId) async {
+    if (operationIds.isEmpty) return;
+    final database = await db;
+    await database.transaction((txn) async {
+      for (final operationId in operationIds) {
+        final rows = await txn.query('sync_outbox', where: 'id = ?', whereArgs: [operationId], limit: 1);
+        if (rows.isEmpty) continue;
+        final row = rows.first;
+        final version = versionsByOperationId[operationId];
+        if (version != null) {
+          await txn.insert(
+            'sync_entity_versions',
+            {'entity_type': row['entity_type'], 'entity_id': row['entity_id'], 'version': version},
+            conflictAlgorithm: sql.ConflictAlgorithm.replace,
+          );
+        }
+        await txn.delete('sync_outbox', where: 'id = ?', whereArgs: [operationId]);
+      }
+    });
+  }
+
+  Future<void> markOutboxFailed(String operationId, Object error) async {
+    await (await db).rawUpdate(
+      'UPDATE sync_outbox SET attempt_count = attempt_count + 1, last_attempt_at = ?, last_error = ? WHERE id = ?',
+      [DateTime.now().millisecondsSinceEpoch, redactSyncSecrets(error.toString()), operationId],
+    );
+  }
+
+  Future<void> saveSyncConflict({
+    required String entityType,
+    required String entityId,
+    required String? localOperationId,
+    required int serverVersion,
+    required String details,
+  }) async {
+    await (await db).insert('sync_conflicts', {
+      'id': _uuid.v4(),
+      'entity_type': entityType,
+      'entity_id': entityId,
+      'local_operation_id': localOperationId,
+      'server_version': serverVersion,
+      'details': details,
+      'created_at': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  Future<void> applyRemoteChanges(List<Map<String, dynamic>> changes, Future<void> Function(Map<String, dynamic>) applyPreferences) async {
+    final database = await db;
+    await database.transaction((txn) async {
+      for (final change in changes) {
+        final entityType = change['entityType'] as String? ?? '';
+        final entityId = change['entityId'] as String? ?? '';
+        final operation = change['operation'] as String? ?? '';
+        final version = (change['version'] as num? ?? 0).toInt();
+        if (entityType == 'preferences') continue;
+        if (!syncTables.contains(entityType) || entityId.isEmpty) continue;
+        if (operation == 'delete') {
+          if (entityType == 'budgets') {
+            await txn.delete('budget_accounts', where: 'budget_id = ?', whereArgs: [entityId]);
+            await txn.delete('budget_categories', where: 'budget_id = ?', whereArgs: [entityId]);
+          }
+          if (entityType == 'loans') {
+            await txn.delete('loan_repayments', where: 'loan_id = ?', whereArgs: [entityId]);
+            await txn.delete('loan_repayment_reminders', where: 'loan_id = ?', whereArgs: [entityId]);
+          }
+          await txn.delete(entityType, where: _whereForEntity(entityType), whereArgs: _whereArgsForEntity(entityType, entityId));
+        } else {
+          final payload = (change['payload'] as Map? ?? {}).cast<String, Object?>();
+          await txn.insert(entityType, payload, conflictAlgorithm: sql.ConflictAlgorithm.replace);
+        }
+        await txn.insert(
+          'sync_entity_versions',
+          {'entity_type': entityType, 'entity_id': entityId, 'version': version},
+          conflictAlgorithm: sql.ConflictAlgorithm.replace,
+        );
+      }
+    });
+    for (final change in changes) {
+      if (change['entityType'] == 'preferences' && change['operation'] == 'upsert') {
+        final payload = (change['payload'] as Map? ?? {}).cast<String, dynamic>();
+        await applyPreferences(payload);
+        await saveEntityVersion('preferences', 'koinly', (change['version'] as num? ?? 0).toInt());
+      }
+    }
+  }
+
+  String _whereForEntity(String table) {
+    switch (table) {
+      case 'budget_accounts':
+      case 'budget_categories':
+        return 'budget_id = ? AND ${table == 'budget_accounts' ? 'account_id' : 'category_id'} = ?';
+      default:
+        return 'id = ?';
+    }
+  }
+
+  List<Object?> _whereArgsForEntity(String table, String entityId) {
+    switch (table) {
+      case 'budget_accounts':
+      case 'budget_categories':
+        final parts = entityId.split(':');
+        return [parts.first, parts.length > 1 ? parts[1] : ''];
+      default:
+        return [entityId];
+    }
+  }
+
+  String _entityIdForRow(String table, Map<String, Object?> row) {
+    switch (table) {
+      case 'budget_accounts':
+        return '${row['budget_id']}:${row['account_id']}';
+      case 'budget_categories':
+        return '${row['budget_id']}:${row['category_id']}';
+      default:
+        return row['id']?.toString() ?? '';
+    }
+  }
 }
 
 class PrefsStore {
@@ -1480,6 +1734,8 @@ class SecureCredentialStore {
   static const _mongoUrlKey = 'koinly_sync_mongodb_url';
   static const _mongoSyncPinKey = 'koinly_sync_mongodb_pin';
   static const _tursoAuthTokenKey = 'koinly_sync_turso_auth_token';
+  static const _accessTokenKey = 'koinly_account_access_token';
+  static const _refreshTokenKey = 'koinly_account_refresh_token';
 
   Future<String> readCloudSyncPin() async => await _storage.read(key: _cloudSyncPinKey) ?? '';
   Future<void> writeCloudSyncPin(String value) => _writeOrDelete(_cloudSyncPinKey, value);
@@ -1492,6 +1748,17 @@ class SecureCredentialStore {
 
   Future<String> readTursoAuthToken() async => await _storage.read(key: _tursoAuthTokenKey) ?? '';
   Future<void> writeTursoAuthToken(String value) => _writeOrDelete(_tursoAuthTokenKey, value);
+
+  Future<String> readAccessToken() async => await _storage.read(key: _accessTokenKey) ?? '';
+  Future<void> writeAccessToken(String value) => _writeOrDelete(_accessTokenKey, value);
+
+  Future<String> readRefreshToken() async => await _storage.read(key: _refreshTokenKey) ?? '';
+  Future<void> writeRefreshToken(String value) => _writeOrDelete(_refreshTokenKey, value);
+
+  Future<void> clearAccountTokens() async {
+    await _storage.delete(key: _accessTokenKey);
+    await _storage.delete(key: _refreshTokenKey);
+  }
 
   Future<void> _writeOrDelete(String key, String value) async {
     final normalized = value.trim();
@@ -1850,6 +2117,136 @@ class CloudSyncService {
   }
 }
 
+class SyncAuthSession {
+  const SyncAuthSession({
+    required this.accessToken,
+    required this.refreshToken,
+    required this.email,
+    required this.userId,
+    required this.deviceId,
+    required this.accessExpiresAt,
+  });
+
+  final String accessToken;
+  final String refreshToken;
+  final String email;
+  final String userId;
+  final String deviceId;
+  final DateTime accessExpiresAt;
+}
+
+class KoinlySyncApi {
+  KoinlySyncApi({required this.baseUrl});
+
+  final String baseUrl;
+
+  Uri _uri(String path, [Map<String, String>? query]) => Uri.parse('${CloudSyncService.normalizeApiBaseUrl(baseUrl)}$path').replace(queryParameters: query);
+
+  Future<SyncAuthSession> register({
+    required String email,
+    required String password,
+    required String deviceId,
+    required String deviceName,
+    required String platform,
+  }) async {
+    final data = await _post('/v1/auth/register', {
+      'email': email,
+      'password': password,
+      'deviceId': deviceId,
+      'deviceName': deviceName,
+      'platform': platform,
+    });
+    return _sessionFromResponse(data, email);
+  }
+
+  Future<SyncAuthSession> login({
+    required String email,
+    required String password,
+    required String deviceId,
+    required String deviceName,
+    required String platform,
+  }) async {
+    final data = await _post('/v1/auth/login', {
+      'email': email,
+      'password': password,
+      'deviceId': deviceId,
+      'deviceName': deviceName,
+      'platform': platform,
+    });
+    return _sessionFromResponse(data, email);
+  }
+
+  Future<SyncAuthSession> refresh({required String refreshToken, required String deviceId, required String email}) async {
+    final data = await _post('/v1/auth/refresh', {'refreshToken': refreshToken, 'deviceId': deviceId});
+    return _sessionFromResponse(data, email);
+  }
+
+  Future<void> logout({required String accessToken, required String refreshToken}) async {
+    await _post('/v1/auth/logout', {'refreshToken': refreshToken}, accessToken: accessToken);
+  }
+
+  Future<Map<String, dynamic>> push({required String accessToken, required List<Map<String, dynamic>> operations}) {
+    return _post('/v1/sync/push', {'operations': operations}, accessToken: accessToken);
+  }
+
+  Future<Map<String, dynamic>> pull({required String accessToken, required int cursor, int limit = 100}) {
+    return _get('/v1/sync/pull', accessToken: accessToken, query: {'cursor': '$cursor', 'limit': '$limit'});
+  }
+
+  Future<Map<String, dynamic>> status({required String accessToken}) {
+    return _get('/v1/sync/status', accessToken: accessToken);
+  }
+
+  Future<Map<String, dynamic>> _get(String path, {String? accessToken, Map<String, String>? query}) async {
+    final response = await http
+        .get(
+          _uri(path, query),
+          headers: {
+            'accept': 'application/json',
+            if (accessToken != null && accessToken.isNotEmpty) 'authorization': 'Bearer $accessToken',
+          },
+        )
+        .timeout(const Duration(seconds: 25));
+    return _decodeResponse(response);
+  }
+
+  Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> body, {String? accessToken}) async {
+    final response = await http
+        .post(
+          _uri(path),
+          headers: {
+            'content-type': 'application/json',
+            'accept': 'application/json',
+            if (accessToken != null && accessToken.isNotEmpty) 'authorization': 'Bearer $accessToken',
+          },
+          body: jsonEncode(body),
+        )
+        .timeout(const Duration(seconds: 30));
+    return _decodeResponse(response);
+  }
+
+  Map<String, dynamic> _decodeResponse(http.Response response) {
+    final decoded = response.body.trim().isEmpty ? <String, dynamic>{} : jsonDecode(response.body);
+    final data = decoded is Map ? decoded.cast<String, dynamic>() : <String, dynamic>{};
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw CloudSyncException(data['error']?.toString() ?? 'Request failed (${response.statusCode}).');
+    }
+    return data;
+  }
+
+  SyncAuthSession _sessionFromResponse(Map<String, dynamic> data, String fallbackEmail) {
+    final user = (data['user'] as Map? ?? {}).cast<String, dynamic>();
+    return SyncAuthSession(
+      accessToken: data['accessToken']?.toString() ?? '',
+      refreshToken: data['refreshToken']?.toString() ?? '',
+      email: user['email']?.toString() ?? fallbackEmail,
+      userId: user['id']?.toString() ?? '',
+      deviceId: data['deviceId']?.toString() ?? '',
+      accessExpiresAt: DateTime.fromMillisecondsSinceEpoch((data['accessExpiresAt'] as num? ?? DateTime.now().millisecondsSinceEpoch).toInt()),
+    );
+  }
+}
+
 class MongoDbSyncService {
   static const String defaultDatabaseName = 'koinly';
   static const String defaultCollectionName = 'koinly_sync_snapshots';
@@ -2107,6 +2504,12 @@ class AppController extends ChangeNotifier {
   DateTime? cloudSyncLastAt;
   Timer? _cloudSyncDebounce;
   Timer? _cloudSyncRetryTimer;
+  String syncAccountEmail = '';
+  String syncAccessToken = '';
+  String syncRefreshToken = '';
+  String syncDeviceId = '';
+  String syncStatus = 'Offline';
+  bool syncAuthBusy = false;
 
   bool get setupCompletedForCurrentPlatform {
     if (!onboardingCompleted) return false;
@@ -2128,7 +2531,7 @@ class AppController extends ChangeNotifier {
     try {
       await FirebaseAnalytics.instance.logAppOpen();
     } catch (_) {}
-    if (cloudSyncPending) {
+    if (_hasConfiguredSyncTarget()) {
       _schedulePendingSyncRetry(immediate: true);
     }
   }
@@ -2167,13 +2570,13 @@ class AppController extends ChangeNotifier {
     final hour = await prefs.getInt('reminderHour', 21);
     final minute = await prefs.getInt('reminderMinute', 0);
     reminderTime = TimeOfDay(hour: hour, minute: minute);
-    cloudSyncEnabled = await prefs.getBool('cloudSyncEnabled', true);
+    cloudSyncEnabled = await prefs.getBool('cloudSyncEnabled', false);
     syncDatabaseProvider = await prefs.getEnum('syncDatabaseProvider', SyncDatabaseProvider.values, SyncDatabaseProvider.mongoDb);
     if (!userSyncDatabaseProviders.contains(syncDatabaseProvider)) {
       syncDatabaseProvider = SyncDatabaseProvider.mongoDb;
-      cloudSyncEnabled = true;
+      cloudSyncEnabled = false;
       await prefs.setEnum('syncDatabaseProvider', SyncDatabaseProvider.mongoDb);
-      await prefs.setBool('cloudSyncEnabled', true);
+      await prefs.setBool('cloudSyncEnabled', false);
     }
     final savedCloudSyncApiBaseUrl = await prefs.getString('cloudSyncApiBaseUrl', '');
     cloudSyncApiBaseUrl = CloudSyncService.resolveApiBaseUrl(savedCloudSyncApiBaseUrl);
@@ -2192,14 +2595,19 @@ class AppController extends ChangeNotifier {
     syncMongoSyncPin = await secureCredentials.readMongoDbSyncPin();
     syncTursoDatabaseUrl = await prefs.getString('syncTursoDatabaseUrl', '');
     syncTursoAuthToken = await secureCredentials.readTursoAuthToken();
-    if (syncDatabaseProvider == SyncDatabaseProvider.local) {
-      cloudSyncEnabled = false;
-    } else {
-      cloudSyncEnabled = true;
+    syncAccountEmail = await prefs.getString('syncAccountEmail', '');
+    syncDeviceId = await prefs.getString('syncDeviceId', '');
+    if (syncDeviceId.trim().isEmpty) {
+      syncDeviceId = _uuid.v4();
+      await prefs.setString('syncDeviceId', syncDeviceId);
     }
+    syncAccessToken = await secureCredentials.readAccessToken();
+    syncRefreshToken = await secureCredentials.readRefreshToken();
+    cloudSyncEnabled = syncAccessToken.isNotEmpty && syncRefreshToken.isNotEmpty;
     final lastSyncRaw = await prefs.getString('cloudSyncLastAt', '');
     cloudSyncLastAt = lastSyncRaw.isEmpty ? null : DateTime.tryParse(lastSyncRaw);
     cloudSyncPending = await prefs.getBool('cloudSyncPending', false);
+    syncStatus = cloudSyncEnabled ? cloudSyncStatusText : 'Offline';
   }
 
   Future<Map<String, dynamic>> exportPreferences() async => {
@@ -2263,7 +2671,7 @@ class AppController extends ChangeNotifier {
     if (cloudSyncPending) return 'Online sync • Waiting for internet';
     if (cloudSyncErrorCode == 'SYNC_APPROVAL_REQUIRED') return 'Online sync • Admin approval required';
     if (cloudSyncError != null && cloudSyncError!.trim().isNotEmpty) return 'Online sync • Error: $cloudSyncError';
-    if (!cloudSyncEnabled) return 'Online sync • Waiting for database setup';
+    if (!cloudSyncEnabled) return 'Online sync • Sign in required';
     if (cloudSyncLastAt == null) return 'Online sync • Enabled • Not synced yet';
     return 'Online sync • Last sync ${DateFormat('yyyy-MM-dd HH:mm').format(cloudSyncLastAt!.toLocal())}';
   }
@@ -2444,127 +2852,197 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> syncToCloud({bool force = false, bool silent = false}) async {
-    if (cloudSyncBusy) return;
-    if (!_hasConfiguredSyncTarget()) return;
-    if (syncDatabaseProvider != SyncDatabaseProvider.mongoDb && (cloudSyncId.trim().isEmpty || cloudSyncPin.trim().isEmpty)) {
-      await ensureCloudSyncCredentials();
+    await performMultiDeviceSync(silent: silent);
+  }
+
+  Future<void> syncFromCloud() async {
+    await performMultiDeviceSync(pushLocalChanges: false);
+  }
+
+  Future<void> registerSyncAccount({required String apiBaseUrl, required String email, required String password}) async {
+    await _authenticateSyncAccount(register: true, apiBaseUrl: apiBaseUrl, email: email, password: password);
+  }
+
+  Future<void> loginSyncAccount({required String apiBaseUrl, required String email, required String password}) async {
+    await _authenticateSyncAccount(register: false, apiBaseUrl: apiBaseUrl, email: email, password: password);
+  }
+
+  Future<void> _authenticateSyncAccount({required bool register, required String apiBaseUrl, required String email, required String password}) async {
+    syncAuthBusy = true;
+    cloudSyncError = null;
+    syncStatus = register ? 'Creating account...' : 'Signing in...';
+    notifyListeners();
+    try {
+      cloudSyncApiBaseUrl = CloudSyncService.normalizeApiBaseUrl(apiBaseUrl);
+      final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
+      final session = register
+          ? await api.register(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName())
+          : await api.login(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName());
+      await _saveSyncSession(session);
+      await database.enqueueAllForAdoption(await exportPreferences());
+      await performMultiDeviceSync(silent: true);
+    } catch (error) {
+      cloudSyncError = _cleanSyncError(error);
+      syncStatus = 'Sync error';
+    } finally {
+      syncAuthBusy = false;
+      notifyListeners();
     }
+  }
+
+  Future<void> logoutSyncAccount() async {
+    syncAuthBusy = true;
+    notifyListeners();
+    try {
+      if (syncAccessToken.isNotEmpty && syncRefreshToken.isNotEmpty && cloudSyncApiBaseUrl.isNotEmpty) {
+        await KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl).logout(accessToken: syncAccessToken, refreshToken: syncRefreshToken);
+      }
+    } catch (_) {
+      // Local logout should still clear this device even if the server is offline.
+    }
+    await secureCredentials.clearAccountTokens();
+    syncAccessToken = '';
+    syncRefreshToken = '';
+    syncAccountEmail = '';
+    cloudSyncEnabled = false;
+    syncStatus = 'Offline';
+    await prefs.setString('syncAccountEmail', '');
+    await prefs.setBool('cloudSyncEnabled', false);
+    syncAuthBusy = false;
+    notifyListeners();
+  }
+
+  Future<void> _saveSyncSession(SyncAuthSession session) async {
+    syncAccessToken = session.accessToken;
+    syncRefreshToken = session.refreshToken;
+    syncAccountEmail = session.email;
+    syncDeviceId = session.deviceId.isNotEmpty ? session.deviceId : syncDeviceId;
+    cloudSyncEnabled = syncAccessToken.isNotEmpty && syncRefreshToken.isNotEmpty;
+    await secureCredentials.writeAccessToken(syncAccessToken);
+    await secureCredentials.writeRefreshToken(syncRefreshToken);
+    await prefs.setString('syncAccountEmail', syncAccountEmail);
+    await prefs.setString('syncDeviceId', syncDeviceId);
+    await prefs.setString('cloudSyncApiBaseUrl', cloudSyncApiBaseUrl);
+    await prefs.setBool('cloudSyncEnabled', cloudSyncEnabled);
+  }
+
+  Future<void> _refreshSyncSession() async {
+    if (syncRefreshToken.isEmpty) throw StateError('Sign in to sync first.');
+    final session = await KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl).refresh(refreshToken: syncRefreshToken, deviceId: syncDeviceId, email: syncAccountEmail);
+    await _saveSyncSession(session);
+  }
+
+  Future<void> performMultiDeviceSync({bool silent = false, bool pushLocalChanges = true}) async {
+    if (cloudSyncBusy || !_hasConfiguredSyncTarget()) return;
     cloudSyncBusy = true;
     if (!silent) {
       cloudSyncError = null;
       cloudSyncErrorCode = null;
     }
+    syncStatus = 'Syncing...';
     notifyListeners();
     try {
-      final payload = await exportCloudPayload();
-      switch (syncDatabaseProvider) {
-        case SyncDatabaseProvider.local:
-          break;
-        case SyncDatabaseProvider.turso:
-        case SyncDatabaseProvider.cloudflareD1:
-        case SyncDatabaseProvider.supabase:
-        case SyncDatabaseProvider.neonPostgres:
-        case SyncDatabaseProvider.firebaseFirestore:
-          await CloudSyncService.upload(apiBaseUrl: cloudSyncApiBaseUrl, syncId: cloudSyncId, pin: cloudSyncPin, payload: payload);
-          break;
-        case SyncDatabaseProvider.mongoDb:
-          await MongoDbSyncService.upload(
-            connectionString: syncMongoDbUrl,
-            databaseName: syncMongoDatabaseName,
-            collectionName: syncMongoCollectionName,
-            payload: payload,
-          );
-          break;
+      final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
+      if (pushLocalChanges) {
+        final pending = await database.pendingSyncOperations(limit: 50);
+        if (pending.isNotEmpty) {
+          final operations = pending.map(_operationFromOutboxRow).toList();
+          final response = await api.push(accessToken: syncAccessToken, operations: operations);
+          final accepted = (response['accepted'] as List? ?? const []).cast<Map>();
+          final acceptedIds = <String>[];
+          final versions = <String, int>{};
+          for (final item in accepted) {
+            final operationId = item['operationId']?.toString() ?? '';
+            if (operationId.isEmpty) continue;
+            acceptedIds.add(operationId);
+            versions[operationId] = (item['version'] as num? ?? 0).toInt();
+          }
+          await database.markOutboxUploaded(acceptedIds, versions);
+          final conflicts = (response['conflicts'] as List? ?? const []).cast<Map>();
+          for (final conflict in conflicts) {
+            await database.saveSyncConflict(
+              entityType: conflict['entityType']?.toString() ?? '',
+              entityId: conflict['entityId']?.toString() ?? '',
+              localOperationId: conflict['operationId']?.toString(),
+              serverVersion: (conflict['serverVersion'] as num? ?? 0).toInt(),
+              details: jsonEncode(conflict),
+            );
+          }
+        }
       }
+
+      var cursor = int.tryParse(await database.readSyncState('serverCursor', '0')) ?? 0;
+      var hasMore = true;
+      while (hasMore) {
+        final response = await api.pull(accessToken: syncAccessToken, cursor: cursor, limit: 100);
+        final changes = (response['changes'] as List? ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
+        await database.applyRemoteChanges(changes, importPreferences);
+        cursor = (response['cursor'] as num? ?? cursor).toInt();
+        hasMore = response['hasMore'] == true;
+        await database.writeSyncState('serverCursor', '$cursor');
+      }
+
       cloudSyncLastAt = DateTime.now();
       await prefs.setString('cloudSyncLastAt', cloudSyncLastAt!.toIso8601String());
       await _setCloudSyncPending(false);
       cloudSyncError = null;
       cloudSyncErrorCode = null;
-      _cloudSyncRetryTimer?.cancel();
-      _cloudSyncRetryTimer = null;
+      syncStatus = 'Synced';
+      await reload();
     } catch (error) {
+      final text = _cleanSyncError(error);
+      if (text.toLowerCase().contains('expired') || text.toLowerCase().contains('access token')) {
+        await _refreshSyncSession();
+        cloudSyncBusy = false;
+        await performMultiDeviceSync(silent: silent, pushLocalChanges: pushLocalChanges);
+        return;
+      }
       await _setCloudSyncPending(true);
       _schedulePendingSyncRetry();
       if (!silent) {
-        cloudSyncError = _cleanSyncError(error);
+        cloudSyncError = text;
         cloudSyncErrorCode = error is CloudSyncException ? error.code : null;
-      } else {
-        cloudSyncError = null;
-        cloudSyncErrorCode = null;
       }
+      syncStatus = 'Sync error';
     } finally {
       cloudSyncBusy = false;
       notifyListeners();
     }
   }
 
-  Future<void> syncFromCloud() async {
-    if (cloudSyncBusy) return;
-    if (syncDatabaseProvider == SyncDatabaseProvider.local) {
-      cloudSyncError = 'Local Database mode is enabled. Choose an online database method to download cloud data.';
-      notifyListeners();
-      return;
-    }
-    if (syncDatabaseProvider != SyncDatabaseProvider.mongoDb && (cloudSyncId.trim().isEmpty || cloudSyncPin.trim().isEmpty)) {
-      cloudSyncError = 'Upload local data first to create a Sync ID and PIN, or enter an existing Sync ID and PIN.';
-      notifyListeners();
-      return;
-    }
-    cloudSyncBusy = true;
-    cloudSyncError = null;
-    cloudSyncErrorCode = null;
-    notifyListeners();
+  Map<String, dynamic> _operationFromOutboxRow(Map<String, Object?> row) {
+    final payloadRaw = row['payload_json']?.toString();
+    return {
+      'operationId': row['id']?.toString() ?? '',
+      'entityType': row['entity_type']?.toString() ?? '',
+      'entityId': row['entity_id']?.toString() ?? '',
+      'operation': row['operation']?.toString() ?? 'upsert',
+      'payload': payloadRaw == null || payloadRaw.isEmpty ? null : jsonDecode(payloadRaw),
+      'baseVersion': (row['base_version'] as num? ?? 0).toInt(),
+      'clientUpdatedAt': row['created_at'],
+    };
+  }
+
+  bool _hasConfiguredSyncTarget() =>
+      cloudSyncEnabled && cloudSyncApiBaseUrl.trim().isNotEmpty && syncAccessToken.trim().isNotEmpty && syncRefreshToken.trim().isNotEmpty;
+
+  String _deviceName() {
+    if (kIsWeb) return 'Koinly Web';
     try {
-      late final Map<String, dynamic> payload;
-      switch (syncDatabaseProvider) {
-        case SyncDatabaseProvider.local:
-          payload = <String, dynamic>{};
-          break;
-        case SyncDatabaseProvider.turso:
-        case SyncDatabaseProvider.cloudflareD1:
-        case SyncDatabaseProvider.supabase:
-        case SyncDatabaseProvider.neonPostgres:
-        case SyncDatabaseProvider.firebaseFirestore:
-          payload = await CloudSyncService.download(apiBaseUrl: cloudSyncApiBaseUrl, syncId: cloudSyncId, pin: cloudSyncPin);
-          break;
-        case SyncDatabaseProvider.mongoDb:
-          payload = await MongoDbSyncService.download(
-            connectionString: syncMongoDbUrl,
-            databaseName: syncMongoDatabaseName,
-            collectionName: syncMongoCollectionName,
-          );
-          break;
-      }
-      final databasePayload = (payload['database'] as Map? ?? {}).cast<String, dynamic>();
-      final preferencesPayload = (payload['preferences'] as Map? ?? {}).cast<String, dynamic>();
-      await database.importAll(databasePayload);
-      await importPreferences(preferencesPayload);
-      cloudSyncEnabled = true;
-      await prefs.setBool('cloudSyncEnabled', true);
-      await prefs.setEnum('syncDatabaseProvider', syncDatabaseProvider);
-      await prefs.setString('cloudSyncApiBaseUrl', cloudSyncApiBaseUrl);
-      if (syncDatabaseProvider != SyncDatabaseProvider.mongoDb) {
-        await prefs.setString('cloudSyncId', cloudSyncId);
-        await secureCredentials.writeCloudSyncPin(cloudSyncPin);
-        await (await prefs.prefs).remove('cloudSyncPin');
-      }
-      cloudSyncLastAt = DateTime.now();
-      await prefs.setString('cloudSyncLastAt', cloudSyncLastAt!.toIso8601String());
-      await reload(queueSync: false);
-    } catch (error) {
-      cloudSyncError = _cleanSyncError(error);
-      cloudSyncErrorCode = error is CloudSyncException ? error.code : null;
-    } finally {
-      cloudSyncBusy = false;
-      notifyListeners();
+      return Platform.localHostname.isEmpty ? 'Koinly device' : Platform.localHostname;
+    } catch (_) {
+      return 'Koinly device';
     }
   }
 
-  bool _hasConfiguredSyncTarget() {
-    if (syncDatabaseProvider == SyncDatabaseProvider.local) return false;
-    if (syncDatabaseProvider == SyncDatabaseProvider.mongoDb) return syncMongoDbUrl.trim().isNotEmpty;
-    return cloudSyncApiBaseUrl.trim().isNotEmpty;
+  String _platformName() {
+    if (kIsWeb) return 'web';
+    if (Platform.isAndroid) return 'android';
+    if (Platform.isWindows) return 'windows';
+    if (Platform.isLinux) return 'linux';
+    if (Platform.isMacOS) return 'macos';
+    if (Platform.isIOS) return 'ios';
+    return 'unknown';
   }
 
   Future<void> _setCloudSyncPending(bool value) async {
@@ -2738,7 +3216,7 @@ class AppController extends ChangeNotifier {
     savingsSuggestionProfile = profile.copyWith(completed: true, updatedOn: DateTime.now());
     await prefs.setString('savingsSuggestionProfile', jsonEncode(savingsSuggestionProfile.toJson()));
     notifyListeners();
-    queueCloudSync();
+    await queuePreferenceSync();
   }
 
   Future<void> saveSavingsIdea(String id) async {
@@ -2746,7 +3224,7 @@ class AppController extends ChangeNotifier {
       savedSavingsIdeas = [...savedSavingsIdeas, id];
       await prefs.setStringList('savedSavingsIdeas', savedSavingsIdeas);
       notifyListeners();
-      queueCloudSync();
+      await queuePreferenceSync();
     }
   }
 
@@ -2755,7 +3233,7 @@ class AppController extends ChangeNotifier {
       plannedSavingsIdeas = [...plannedSavingsIdeas, id];
       await prefs.setStringList('plannedSavingsIdeas', plannedSavingsIdeas);
       notifyListeners();
-      queueCloudSync();
+      await queuePreferenceSync();
     }
   }
 
@@ -2841,7 +3319,7 @@ class AppController extends ChangeNotifier {
     themePreference = value;
     await prefs.setEnum('themePreference', value);
     notifyListeners();
-    queueCloudSync();
+    await queuePreferenceSync();
   }
 
   Future<void> saveCurrency({required String symbol, required String code, required CurrencyPosition position, required bool separators}) async {
@@ -2854,7 +3332,7 @@ class AppController extends ChangeNotifier {
     await prefs.setEnum('currencyPosition', position);
     await prefs.setBool('useSeparators', separators);
     notifyListeners();
-    queueCloudSync();
+    await queuePreferenceSync();
   }
 
   Future<void> setDateRange(DateRangeType type, {DateTime? start, DateTime? end}) async {
@@ -2865,7 +3343,7 @@ class AppController extends ChangeNotifier {
     await prefs.setString('customStart', start?.toIso8601String() ?? '');
     await prefs.setString('customEnd', end?.toIso8601String() ?? '');
     notifyListeners();
-    queueCloudSync();
+    await queuePreferenceSync();
   }
 
   Future<void> saveFilters({List<String>? accounts, List<String>? categories, List<MoneyTransactionType>? types}) async {
@@ -2876,7 +3354,7 @@ class AppController extends ChangeNotifier {
     await prefs.setStringList('filterCategoryIds', filterCategoryIds);
     await prefs.setStringList('filterTypes', filterTypes.map(enumName).toList());
     notifyListeners();
-    queueCloudSync();
+    await queuePreferenceSync();
   }
 
   Future<void> clearFilters() => saveFilters(accounts: [], categories: [], types: []);
@@ -2889,21 +3367,21 @@ class AppController extends ChangeNotifier {
     await prefs.setString('defaultIncomeCategoryId', defaultIncomeCategoryId ?? '');
     await prefs.setString('defaultExpenseCategoryId', defaultExpenseCategoryId ?? '');
     notifyListeners();
-    queueCloudSync();
+    await queuePreferenceSync();
   }
 
   Future<void> setCompactHome(bool value) async {
     compactHomeSummary = value;
     await prefs.setBool('compactHomeSummary', value);
     notifyListeners();
-    queueCloudSync();
+    await queuePreferenceSync();
   }
 
   Future<void> setAppLock(bool value) async {
     appLockEnabled = value;
     await prefs.setBool('appLockEnabled', value);
     notifyListeners();
-    queueCloudSync();
+    await queuePreferenceSync();
   }
 
   Future<void> setReminder(bool enabled, TimeOfDay time) async {
@@ -2918,36 +3396,128 @@ class AppController extends ChangeNotifier {
       await ReminderService.cancel();
     }
     notifyListeners();
+    await queuePreferenceSync();
+  }
+
+  Future<void> queuePreferenceSync() async {
+    await database.enqueuePreferences(await exportPreferences());
     queueCloudSync();
   }
 
-  Future<void> saveAccount(Account account) async { await database.upsertAccount(account); await reload(queueSync: true); }
-  Future<void> deleteAccount(String id) async { await database.deleteAccount(id); await reload(queueSync: true); }
-  Future<void> reorderAccounts(List<Account> ordered) async { await database.reorderAccounts(ordered); await reload(queueSync: true); }
-  Future<void> saveCategory(Category category) async { await database.upsertCategory(category); await reload(queueSync: true); }
-  Future<void> deleteCategory(String id) async { await database.deleteCategory(id); await reload(queueSync: true); }
-  Future<void> addTransaction(MoneyTransaction tx) async { await database.addTransaction(tx); await reload(queueSync: true); }
-  Future<void> updateTransaction(MoneyTransaction tx) async { await database.updateTransaction(tx); await reload(queueSync: true); }
-  Future<void> deleteTransaction(String id) async { await database.deleteTransaction(id); await reload(queueSync: true); }
-  Future<void> saveBudget(Budget budget) async { await database.upsertBudget(budget); await reload(queueSync: true); }
-  Future<void> deleteBudget(String id) async { await database.deleteBudget(id); await reload(queueSync: true); }
-  Future<void> addLoan(Loan loan) async { await database.addLoan(loan); await reload(queueSync: true); }
-  Future<void> updateLoan(Loan loan) async { await database.updateLoan(loan); await reload(queueSync: true); }
+  Future<void> saveAccount(Account account) async {
+    await database.upsertAccount(account);
+    await database.enqueueTableRow('accounts', account.id);
+    await reload(queueSync: true);
+  }
+
+  Future<void> deleteAccount(String id) async {
+    await database.enqueueDelete('accounts', id);
+    await database.deleteAccount(id);
+    await reload(queueSync: true);
+  }
+
+  Future<void> reorderAccounts(List<Account> ordered) async {
+    await database.reorderAccounts(ordered);
+    for (final account in ordered) {
+      await database.enqueueTableRow('accounts', account.id);
+    }
+    await reload(queueSync: true);
+  }
+
+  Future<void> saveCategory(Category category) async {
+    await database.upsertCategory(category);
+    await database.enqueueTableRow('categories', category.id);
+    await reload(queueSync: true);
+  }
+
+  Future<void> deleteCategory(String id) async {
+    await database.enqueueDelete('categories', id);
+    await database.deleteCategory(id);
+    await reload(queueSync: true);
+  }
+
+  Future<void> addTransaction(MoneyTransaction tx) async {
+    await database.addTransaction(tx);
+    await database.enqueueTableRow('transactions', tx.id);
+    await database.enqueueRowsForTable('accounts');
+    await reload(queueSync: true);
+  }
+
+  Future<void> updateTransaction(MoneyTransaction tx) async {
+    await database.updateTransaction(tx);
+    await database.enqueueTableRow('transactions', tx.id);
+    await database.enqueueRowsForTable('accounts');
+    await reload(queueSync: true);
+  }
+
+  Future<void> deleteTransaction(String id) async {
+    await database.enqueueDelete('transactions', id);
+    await database.deleteTransaction(id);
+    await database.enqueueRowsForTable('accounts');
+    await reload(queueSync: true);
+  }
+
+  Future<void> saveBudget(Budget budget) async {
+    await database.upsertBudget(budget);
+    await database.enqueueTableRow('budgets', budget.id);
+    await database.enqueueRowsForTable('budget_accounts', budgetId: budget.id);
+    await database.enqueueRowsForTable('budget_categories', budgetId: budget.id);
+    await reload(queueSync: true);
+  }
+
+  Future<void> deleteBudget(String id) async {
+    await database.enqueueDelete('budgets', id);
+    await database.deleteBudget(id);
+    await reload(queueSync: true);
+  }
+
+  Future<void> addLoan(Loan loan) async {
+    await database.addLoan(loan);
+    await database.enqueueTableRow('loans', loan.id);
+    await database.enqueueRowsForTable('accounts');
+    await reload(queueSync: true);
+  }
+
+  Future<void> updateLoan(Loan loan) async {
+    await database.updateLoan(loan);
+    await database.enqueueTableRow('loans', loan.id);
+    await database.enqueueRowsForTable('accounts');
+    await reload(queueSync: true);
+  }
+
   Future<void> deleteLoan(String id) async {
     for (final reminder in loanRemindersFor(id)) {
       await ReminderService.cancelLoanRepaymentReminder(reminder.id);
     }
+    await database.enqueueDelete('loans', id);
     await database.deleteLoan(id);
+    await database.enqueueRowsForTable('accounts');
     await reload(queueSync: true);
   }
-  Future<void> addRepayment(Loan loan, LoanRepayment repayment, String accountId) async { await database.addRepayment(loan, repayment, accountId); await reload(queueSync: true); }
-  Future<void> deleteRepayment(String id) async { await database.deleteRepayment(id); await reload(queueSync: true); }
+
+  Future<void> addRepayment(Loan loan, LoanRepayment repayment, String accountId) async {
+    await database.addRepayment(loan, repayment, accountId);
+    await database.enqueueTableRow('loan_repayments', repayment.id);
+    await database.enqueueTableRow('loans', loan.id);
+    await database.enqueueRowsForTable('accounts');
+    await reload(queueSync: true);
+  }
+
+  Future<void> deleteRepayment(String id) async {
+    await database.enqueueDelete('loan_repayments', id);
+    await database.deleteRepayment(id);
+    await database.enqueueRowsForTable('accounts');
+    await reload(queueSync: true);
+  }
 
   Future<void> replaceLoanRepaymentReminders(String loanId, List<LoanRepaymentReminder> reminders) async {
     for (final oldReminder in loanRemindersFor(loanId).where((r) => !r.isPaid)) {
       await ReminderService.cancelLoanRepaymentReminder(oldReminder.id);
     }
     await database.replacePendingLoanRepaymentReminders(loanId, reminders);
+    for (final reminder in reminders) {
+      await database.enqueueTableRow('loan_repayment_reminders', reminder.id);
+    }
     final loan = loanOf(loanId);
     if (loan != null) {
       for (final reminder in reminders) {
@@ -2959,12 +3529,16 @@ class AppController extends ChangeNotifier {
 
   Future<void> deleteLoanRepaymentReminder(String id) async {
     await ReminderService.cancelLoanRepaymentReminder(id);
+    await database.enqueueDelete('loan_repayment_reminders', id);
     await database.deleteLoanRepaymentReminder(id);
     await reload(queueSync: true);
   }
 
   Future<void> markLoanRepaymentReminderPaid(Loan loan, LoanRepaymentReminder reminder, String accountId) async {
     await database.markLoanRepaymentReminderPaid(loan, reminder, accountId);
+    await database.enqueueTableRow('loan_repayment_reminders', reminder.id);
+    await database.enqueueTableRow('loans', loan.id);
+    await database.enqueueRowsForTable('accounts');
     await ReminderService.cancelLoanRepaymentReminder(reminder.id);
     await reload(queueSync: true);
   }
@@ -5356,14 +5930,14 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       _OnboardingPane(
                         icon: Icons.account_balance_wallet_rounded,
                         title: 'Track money without losing detail',
-                        body: 'Accounts, categories, transactions, budgets, loans, analysis, exports, reminders, local backup, and optional online sync are available from the first setup.',
+                        body: 'Accounts, categories, transactions, budgets, loans, analysis, exports, reminders, and local backup are available from the first setup.',
                       ),
                       CurrencySetupPane(state: state),
                       AccountSetupPane(state: state),
                       _OnboardingPane(
                         icon: Icons.privacy_tip_rounded,
                         title: 'Private local database',
-                        body: 'Your main finance data is stored locally with SQLite by default. Online sync uploads data only after you configure a Sync ID and PIN in Settings.',
+                        body: 'Your main finance data is stored locally with SQLite. Backup and restore stay on this device unless you share a backup file yourself.',
                       ),
                     ],
                   ),
@@ -11607,7 +12181,7 @@ class SettingsScreen extends StatelessWidget {
             SettingsTile(icon: Icons.payments_rounded, title: 'Currency customization', subtitle: '${state.currencyCode} • ${state.currencyPosition == CurrencyPosition.prefix ? 'Prefix' : 'Suffix'}', color: '#78D8E8', onTap: () => showCurrencySheet(context)),
             SettingsTile(icon: Icons.notifications_active_rounded, title: 'Reminder notification', subtitle: state.reminderEnabled ? 'Daily at ${state.reminderTime.format(context)}' : 'Disabled', color: '#FBC879', onTap: () => showReminderSheet(context)),
             SettingsTile(icon: Icons.lightbulb_rounded, title: 'Savings suggestion profile', subtitle: state.savingsSuggestionProfile.shortLabel, color: '#FFB5D0', onTap: () => showSavingsSuggestionProfileSheet(context)),
-            SettingsTile(icon: Icons.cloud_sync_rounded, title: 'Online data sync', subtitle: state.cloudSyncStatusText, color: '#78D8E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CloudSyncScreen()))),
+            SettingsTile(icon: Icons.cloud_sync_rounded, title: 'Account & sync', subtitle: state.cloudSyncEnabled ? '${state.syncStatus} • ${state.syncAccountEmail}' : 'Sign in for multi-device sync', color: '#78D8E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MultiDeviceSyncScreen()))),
             SettingsTile(icon: Icons.filter_alt_rounded, title: 'Default date filter', subtitle: _dateRangeLabel(state.dateRangeType), color: '#B4A5FF', onTap: () => showDateRangeSheet(context)),
             SettingsTile(icon: Icons.ios_share_rounded, title: 'Export', subtitle: 'CSV / PDF reports with current filters', color: '#FFB5D0', onTap: () => showExportSheet(context)),
             SettingsTile(icon: Icons.tune_rounded, title: 'Advanced settings', subtitle: 'Defaults, reorder, app lock, backup', color: '#9AD0F5', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdvancedSettingsScreen()))),
@@ -11663,6 +12237,183 @@ class SettingsTile extends StatelessWidget {
   }
 }
 
+class MultiDeviceSyncScreen extends StatefulWidget {
+  const MultiDeviceSyncScreen({super.key});
+
+  @override
+  State<MultiDeviceSyncScreen> createState() => _MultiDeviceSyncScreenState();
+}
+
+class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
+  late final TextEditingController _apiController;
+  late final TextEditingController _emailController;
+  late final TextEditingController _passwordController;
+  bool _obscurePassword = true;
+
+  @override
+  void initState() {
+    super.initState();
+    final state = context.read<AppController>();
+    _apiController = TextEditingController(text: state.cloudSyncApiBaseUrl);
+    _emailController = TextEditingController(text: state.syncAccountEmail);
+    _passwordController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _apiController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _login({required bool register}) async {
+    final state = context.read<AppController>();
+    if (_apiController.text.trim().isEmpty || _emailController.text.trim().isEmpty || _passwordController.text.isEmpty) {
+      showSnack(context, 'Enter Worker URL, email, and password.');
+      return;
+    }
+    if (register) {
+      await state.registerSyncAccount(apiBaseUrl: _apiController.text, email: _emailController.text, password: _passwordController.text);
+    } else {
+      await state.loginSyncAccount(apiBaseUrl: _apiController.text, email: _emailController.text, password: _passwordController.text);
+    }
+    if (mounted && state.cloudSyncError == null) {
+      _passwordController.clear();
+      showSnack(context, register ? 'Account created. Sync started.' : 'Signed in. Sync started.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppController>();
+    final signedIn = state.cloudSyncEnabled && state.syncAccountEmail.isNotEmpty;
+    final busy = state.cloudSyncBusy || state.syncAuthBusy;
+    return PageScaffold(
+      title: 'Account & sync',
+      subtitle: signedIn ? state.syncAccountEmail : 'Multi-device online sync',
+      child: ResponsiveContent(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ExpressiveCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 52,
+                        height: 52,
+                        decoration: BoxDecoration(
+                          color: kSleekAccent.withOpacity(.15),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: kSleekAccent.withOpacity(.24)),
+                        ),
+                        child: Icon(signedIn ? Icons.cloud_done_rounded : Icons.cloud_off_rounded, color: kSleekAccent),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(state.syncStatus, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                            const SizedBox(height: 4),
+                            Text(
+                              state.cloudSyncLastAt == null ? 'Not synced yet' : 'Last synced ${DateFormat('MMM d, yyyy HH:mm').format(state.cloudSyncLastAt!.toLocal())}',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (state.cloudSyncError != null && state.cloudSyncError!.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(state.cloudSyncError!, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekExpense, fontWeight: FontWeight.w800)),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _apiController,
+              enabled: !busy,
+              decoration: const InputDecoration(
+                labelText: 'Cloudflare Worker URL',
+                hintText: 'https://koinly-sync.yourname.workers.dev',
+                prefixIcon: Icon(Icons.link_rounded),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _emailController,
+              enabled: !busy && !signedIn,
+              keyboardType: TextInputType.emailAddress,
+              decoration: const InputDecoration(labelText: 'Email', prefixIcon: Icon(Icons.email_rounded)),
+            ),
+            const SizedBox(height: 12),
+            if (!signedIn)
+              TextField(
+                controller: _passwordController,
+                enabled: !busy,
+                obscureText: _obscurePassword,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  prefixIcon: const Icon(Icons.lock_rounded),
+                  suffixIcon: IconButton(
+                    onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                    icon: Icon(_obscurePassword ? Icons.visibility_rounded : Icons.visibility_off_rounded),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 16),
+            if (signedIn)
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    onPressed: busy ? null : () => state.performMultiDeviceSync(),
+                    icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.sync_rounded),
+                    label: const Text('Sync now'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : () => state.logoutSyncAccount(),
+                    icon: const Icon(Icons.logout_rounded),
+                    label: const Text('Sign out'),
+                  ),
+                ],
+              )
+            else
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    onPressed: busy ? null : () => _login(register: false),
+                    icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.login_rounded),
+                    label: const Text('Sign in'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : () => _login(register: true),
+                    icon: const Icon(Icons.person_add_alt_rounded),
+                    label: const Text('Create account'),
+                  ),
+                ],
+              ),
+            const SizedBox(height: 16),
+            Text(
+              'Koinly saves changes locally first, then syncs them automatically in the background. Local backup and restore remain separate safety tools.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class CloudSyncScreen extends StatefulWidget {
   const CloudSyncScreen({super.key});
