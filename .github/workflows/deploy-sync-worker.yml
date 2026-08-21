@@ -31,27 +31,42 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Check Cloudflare credentials
+      - name: Check deployment secrets
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "Missing GitHub secret: CLOUDFLARE_API_TOKEN"
-            echo "Create it in GitHub repo Settings > Secrets and variables > Actions."
+          missing=0
+          for secret_name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TURSO_DATABASE_URL TURSO_AUTH_TOKEN JWT_SECRET; do
+            if [ -z "${!secret_name}" ]; then
+              echo "Missing GitHub secret: ${secret_name}"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Create the missing secrets in GitHub repo Settings > Secrets and variables > Actions."
             exit 1
           fi
-          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "Missing GitHub secret: CLOUDFLARE_ACCOUNT_ID"
-            echo "Create it in GitHub repo Settings > Secrets and variables > Actions."
-            exit 1
-          fi
-          echo "Cloudflare credentials are present."
+          echo "All deployment secrets are present."
           echo "If deploy later fails with authentication code 10000, recreate CLOUDFLARE_API_TOKEN using Cloudflare's Edit Cloudflare Workers token template."
           echo "Required permissions: Account Workers Scripts Edit/Write, Account Settings Read, User Details Read, User Memberships Read."
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
 
       - name: Deploy Worker
-        run: npx wrangler deploy
+        run: |
+          trap 'rm -f .worker-secrets' EXIT
+          umask 077
+          {
+            printf 'TURSO_DATABASE_URL=%s\n' "$TURSO_DATABASE_URL"
+            printf 'TURSO_AUTH_TOKEN=%s\n' "$TURSO_AUTH_TOKEN"
+            printf 'JWT_SECRET=%s\n' "$JWT_SECRET"
+          } > .worker-secrets
+          npx wrangler deploy --secrets-file .worker-secrets
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}

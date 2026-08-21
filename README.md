@@ -384,7 +384,7 @@ cloud/worker/wrangler.toml
 cloud/worker/wrangler.toml.example
 ```
 
-Typical Worker secrets:
+Worker runtime secrets:
 
 ```text
 TURSO_DATABASE_URL
@@ -392,12 +392,21 @@ TURSO_AUTH_TOKEN
 JWT_SECRET
 ```
 
-GitHub Actions deployment also requires these repository secrets:
+GitHub Actions deployment expects all deployment values to be stored as
+repository secrets:
 
 ```text
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
+TURSO_DATABASE_URL
+TURSO_AUTH_TOKEN
+JWT_SECRET
 ```
+
+The deploy workflow passes `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and
+`JWT_SECRET` to Cloudflare as Worker secrets with `wrangler deploy
+--secrets-file`, so you can manage all deploy-time values from GitHub repo
+Settings > Secrets and variables > Actions.
 
 The Cloudflare API token should use the `Edit Cloudflare Workers` template
 for the target account. If you create a custom token manually, include:

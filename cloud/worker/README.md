@@ -23,7 +23,23 @@ secrets and are never shipped in the app.
 1. Create a Turso database.
 2. Apply `schema.sql`.
 3. Review `wrangler.toml` and adjust the Worker name if needed.
-4. Add Worker runtime secrets from your local terminal:
+4. Add deployment secrets in GitHub repo Settings > Secrets and variables >
+   Actions:
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+TURSO_DATABASE_URL
+TURSO_AUTH_TOKEN
+JWT_SECRET
+```
+
+The workflow uploads `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and
+`JWT_SECRET` to Cloudflare as Worker secrets during deploy, so you do not need
+to add them twice when deploying through GitHub Actions.
+
+If you deploy from your local terminal instead of GitHub Actions, add Worker
+runtime secrets manually:
 
 ```bash
 wrangler secret put TURSO_DATABASE_URL
@@ -31,15 +47,7 @@ wrangler secret put TURSO_AUTH_TOKEN
 wrangler secret put JWT_SECRET
 ```
 
-5. For GitHub Actions deployment, add repository secrets in GitHub:
-
-```text
-CLOUDFLARE_API_TOKEN
-CLOUDFLARE_ACCOUNT_ID
-```
-
-Create them in repo Settings > Secrets and variables > Actions. The API token
-must be scoped to the target Cloudflare account and have the Cloudflare
+The Cloudflare API token must be scoped to the target Cloudflare account and have the Cloudflare
 `Edit Cloudflare Workers` token template permissions. If you create it
 manually, include at minimum:
 
@@ -59,14 +67,14 @@ Zone     > Workers Routes    > Edit/Write
 After changing the token in Cloudflare, replace the existing GitHub
 `CLOUDFLARE_API_TOKEN` secret with the new token value.
 
-6. Deploy:
+5. Deploy:
 
 ```bash
 npm install
 npm run deploy
 ```
 
-7. Open the deployed Worker URL in a browser. `/` should return a JSON service
+6. Open the deployed Worker URL in a browser. `/` should return a JSON service
 summary. `/health` should return `ok: true` after `TURSO_DATABASE_URL`,
 `TURSO_AUTH_TOKEN`, and `JWT_SECRET` are configured.
 
