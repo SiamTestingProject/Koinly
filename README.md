@@ -380,6 +380,7 @@ Backend files:
 cloud/worker/src/index.ts
 cloud/worker/schema.sql
 cloud/worker/package.json
+cloud/worker/wrangler.toml
 cloud/worker/wrangler.toml.example
 ```
 

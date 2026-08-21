@@ -20,7 +20,7 @@ secrets and are never shipped in the app.
 
 1. Create a Turso database.
 2. Apply `schema.sql`.
-3. Copy `wrangler.toml.example` to `wrangler.toml`.
+3. Review `wrangler.toml` and adjust the Worker name if needed.
 4. Add secrets:
 
 ```bash
