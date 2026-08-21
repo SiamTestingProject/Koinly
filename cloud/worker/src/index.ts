@@ -30,11 +30,15 @@ const enc = new TextEncoder();
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const db = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
+    let db: Client | undefined;
 
     try {
       if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
-      if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, service: 'koinly-sync' });
+      if (request.method === 'GET' && url.pathname === '/') return rootResponse(env);
+      if (request.method === 'GET' && url.pathname === '/health') return healthResponse(env);
+
+      validateWorkerConfig(env);
+      db = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
 
       if (request.method === 'POST' && url.pathname === '/v1/auth/register') return register(request, env, db);
       if (request.method === 'POST' && url.pathname === '/v1/auth/login') return login(request, env, db);
@@ -50,13 +54,57 @@ export default {
       return json({ error: 'Not found.' }, 404);
     } catch (error) {
       const statusCode = error instanceof HttpError ? error.status : 500;
-      const message = error instanceof Error ? error.message : 'Internal error.';
+      const message = error instanceof HttpError ? error.message : 'Internal server error.';
       return json({ error: message }, statusCode);
     } finally {
-      db.close();
+      db?.close();
     }
   },
 };
+
+function rootResponse(env: Env): Response {
+  return json({
+    ok: true,
+    service: 'koinly-sync',
+    configured: isWorkerConfigured(env),
+    endpoints: {
+      health: '/health',
+      register: 'POST /v1/auth/register',
+      login: 'POST /v1/auth/login',
+      refresh: 'POST /v1/auth/refresh',
+      logout: 'POST /v1/auth/logout',
+      initialSync: 'POST /v1/sync/initial',
+      push: 'POST /v1/sync/push',
+      pull: 'GET /v1/sync/pull?cursor=0&limit=100',
+      status: 'GET /v1/sync/status',
+    },
+  });
+}
+
+function healthResponse(env: Env): Response {
+  const configured = isWorkerConfigured(env);
+  return json({
+    ok: configured,
+    service: 'koinly-sync',
+    configured,
+  }, configured ? 200 : 503);
+}
+
+function isWorkerConfigured(env: Env): boolean {
+  return Boolean(env.TURSO_DATABASE_URL && env.TURSO_AUTH_TOKEN && env.JWT_SECRET);
+}
+
+function validateWorkerConfig(env: Env): void {
+  const missing = [
+    ['TURSO_DATABASE_URL', env.TURSO_DATABASE_URL],
+    ['TURSO_AUTH_TOKEN', env.TURSO_AUTH_TOKEN],
+    ['JWT_SECRET', env.JWT_SECRET],
+  ].filter(([, value]) => !value).map(([name]) => name);
+
+  if (missing.length > 0) {
+    throw new HttpError(503, `Worker is missing required secret(s): ${missing.join(', ')}.`);
+  }
+}
 
 async function register(request: Request, env: Env, db: Client): Promise<Response> {
   const body = await readJson(request);

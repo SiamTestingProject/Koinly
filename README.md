@@ -422,7 +422,10 @@ npm install
 npx wrangler deploy
 ```
 
-Apply `cloud/worker/schema.sql` to Turso before using the Worker. The Flutter app needs only the deployed Worker URL in Settings > Account & sync.
+After deploy, open the Worker URL in a browser. `/` should return a JSON
+service summary and `/health` should report `ok: true` once Worker secrets are
+configured. Apply `cloud/worker/schema.sql` to Turso before using the Worker.
+The Flutter app needs only the deployed Worker URL in Settings > Account & sync.
 
 ---
 

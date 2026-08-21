@@ -7,6 +7,8 @@ secrets and are never shipped in the app.
 
 ## API
 
+- `GET /`
+- `GET /health`
 - `POST /v1/auth/register`
 - `POST /v1/auth/login`
 - `POST /v1/auth/refresh`
@@ -63,6 +65,14 @@ After changing the token in Cloudflare, replace the existing GitHub
 npm install
 npm run deploy
 ```
+
+7. Open the deployed Worker URL in a browser. `/` should return a JSON service
+summary. `/health` should return `ok: true` after `TURSO_DATABASE_URL`,
+`TURSO_AUTH_TOKEN`, and `JWT_SECRET` are configured.
+
+If Cloudflare shows error `1101`, check Worker logs. Most setup-time crashes
+are caused by missing Worker secrets, invalid Turso credentials, or not applying
+`schema.sql` to the Turso database.
 
 ## Sync Model
 
