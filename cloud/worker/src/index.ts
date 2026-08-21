@@ -387,9 +387,13 @@ function b64urlBytes(value: ArrayBuffer | Uint8Array): string {
   return btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-function bytesFromB64Url(value: string): Uint8Array {
+function bytesFromB64Url(value: string): Uint8Array<ArrayBuffer> {
   const raw = atobUrl(value);
-  return Uint8Array.from(raw, c => c.charCodeAt(0));
+  const bytes = new Uint8Array(new ArrayBuffer(raw.length));
+  for (let i = 0; i < raw.length; i += 1) {
+    bytes[i] = raw.charCodeAt(i);
+  }
+  return bytes;
 }
 
 function atobUrl(value: string): string {
