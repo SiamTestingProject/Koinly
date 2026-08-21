@@ -2,11 +2,6 @@ name: Build Android APKs and Windows Installer
 
 on:
   workflow_dispatch:
-    inputs:
-      sync_api_base_url:
-        description: "Cloudflare Worker URL for online sync, for example https://koinly-sync.yourname.workers.dev"
-        required: false
-        type: string
   push:
     branches:
       - main
@@ -79,13 +74,18 @@ jobs:
       - name: Prepare artifact folder
         run: mkdir -p artifacts
 
-      - name: Build universal release APK
+      - name: Validate sync backend build config
         env:
-          KOINLY_SYNC_API_BASE_URL: ${{ github.event.inputs.sync_api_base_url || vars.KOINLY_SYNC_API_BASE_URL || secrets.KOINLY_SYNC_API_BASE_URL }}
+          KOINLY_SYNC_API_BASE_URL: ${{ secrets.KOINLY_SYNC_API_BASE_URL || vars.KOINLY_SYNC_API_BASE_URL }}
         run: |
           if [ -z "$KOINLY_SYNC_API_BASE_URL" ]; then
-            echo "::warning::KOINLY_SYNC_API_BASE_URL is empty. The APKs will build, but online sync will show a backend URL configuration error until you rebuild with the Worker URL."
+            echo "::error::Missing KOINLY_SYNC_API_BASE_URL. Add it as a GitHub repository secret or variable before building app releases."
+            exit 1
           fi
+          echo "KOINLY_SYNC_API_BASE_URL=$KOINLY_SYNC_API_BASE_URL" >> "$GITHUB_ENV"
+
+      - name: Build universal release APK
+        run: |
           flutter build apk \
             --release \
             --target-platform android-arm,android-arm64 \
@@ -94,8 +94,6 @@ jobs:
           cp build/app/outputs/flutter-apk/app-release.apk artifacts/koinly-universal-release.apk
 
       - name: Build ARM32 and ARM64 split APKs
-        env:
-          KOINLY_SYNC_API_BASE_URL: ${{ github.event.inputs.sync_api_base_url || vars.KOINLY_SYNC_API_BASE_URL || secrets.KOINLY_SYNC_API_BASE_URL }}
         run: |
           flutter build apk \
             --release \
@@ -207,6 +205,17 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Validate sync backend build config
+        shell: pwsh
+        env:
+          KOINLY_SYNC_API_BASE_URL: ${{ secrets.KOINLY_SYNC_API_BASE_URL || vars.KOINLY_SYNC_API_BASE_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:KOINLY_SYNC_API_BASE_URL)) {
+            Write-Host "::error::Missing KOINLY_SYNC_API_BASE_URL. Add it as a GitHub repository secret or variable before building app releases."
+            exit 1
+          }
+          "KOINLY_SYNC_API_BASE_URL=$env:KOINLY_SYNC_API_BASE_URL" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Prepare optional Windows code signing
         shell: pwsh
         env:
@@ -249,12 +258,7 @@ jobs:
           Write-Host "Windows code signing is enabled. SignTool: $($signtool.FullName)"
 
       - name: Build Windows release
-        env:
-          KOINLY_SYNC_API_BASE_URL: ${{ github.event.inputs.sync_api_base_url || vars.KOINLY_SYNC_API_BASE_URL || secrets.KOINLY_SYNC_API_BASE_URL }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:KOINLY_SYNC_API_BASE_URL)) {
-            Write-Host "::warning::KOINLY_SYNC_API_BASE_URL is empty. The Windows app will build, but online sync will show a backend URL configuration error until you rebuild with the Worker URL."
-          }
           $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
           $env:CL = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
           flutter build windows --release --dart-define=KOINLY_SYNC_API_BASE_URL="$env:KOINLY_SYNC_API_BASE_URL"

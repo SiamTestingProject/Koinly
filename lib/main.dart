@@ -2859,21 +2859,24 @@ class AppController extends ChangeNotifier {
     await performMultiDeviceSync(pushLocalChanges: false);
   }
 
-  Future<void> registerSyncAccount({required String apiBaseUrl, required String email, required String password}) async {
-    await _authenticateSyncAccount(register: true, apiBaseUrl: apiBaseUrl, email: email, password: password);
+  Future<void> registerSyncAccount({required String email, required String password}) async {
+    await _authenticateSyncAccount(register: true, email: email, password: password);
   }
 
-  Future<void> loginSyncAccount({required String apiBaseUrl, required String email, required String password}) async {
-    await _authenticateSyncAccount(register: false, apiBaseUrl: apiBaseUrl, email: email, password: password);
+  Future<void> loginSyncAccount({required String email, required String password}) async {
+    await _authenticateSyncAccount(register: false, email: email, password: password);
   }
 
-  Future<void> _authenticateSyncAccount({required bool register, required String apiBaseUrl, required String email, required String password}) async {
+  Future<void> _authenticateSyncAccount({required bool register, required String email, required String password}) async {
     syncAuthBusy = true;
     cloudSyncError = null;
     syncStatus = register ? 'Creating account...' : 'Signing in...';
     notifyListeners();
     try {
-      cloudSyncApiBaseUrl = CloudSyncService.normalizeApiBaseUrl(apiBaseUrl);
+      cloudSyncApiBaseUrl = CloudSyncService.configuredApiBaseUrl;
+      if (cloudSyncApiBaseUrl.isEmpty) {
+        throw StateError('Online sync backend is not configured in this build. Set KOINLY_SYNC_API_BASE_URL in GitHub Actions and rebuild the app.');
+      }
       final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
       final session = register
           ? await api.register(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName())
@@ -12245,7 +12248,6 @@ class MultiDeviceSyncScreen extends StatefulWidget {
 }
 
 class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
-  late final TextEditingController _apiController;
   late final TextEditingController _emailController;
   late final TextEditingController _passwordController;
   bool _obscurePassword = true;
@@ -12254,14 +12256,12 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
   void initState() {
     super.initState();
     final state = context.read<AppController>();
-    _apiController = TextEditingController(text: state.cloudSyncApiBaseUrl);
     _emailController = TextEditingController(text: state.syncAccountEmail);
     _passwordController = TextEditingController();
   }
 
   @override
   void dispose() {
-    _apiController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
@@ -12269,14 +12269,18 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
 
   Future<void> _login({required bool register}) async {
     final state = context.read<AppController>();
-    if (_apiController.text.trim().isEmpty || _emailController.text.trim().isEmpty || _passwordController.text.isEmpty) {
-      showSnack(context, 'Enter Worker URL, email, and password.');
+    if (CloudSyncService.configuredApiBaseUrl.trim().isEmpty) {
+      showSnack(context, 'Online sync backend is not configured in this build.');
+      return;
+    }
+    if (_emailController.text.trim().isEmpty || _passwordController.text.isEmpty) {
+      showSnack(context, 'Enter email and password.');
       return;
     }
     if (register) {
-      await state.registerSyncAccount(apiBaseUrl: _apiController.text, email: _emailController.text, password: _passwordController.text);
+      await state.registerSyncAccount(email: _emailController.text, password: _passwordController.text);
     } else {
-      await state.loginSyncAccount(apiBaseUrl: _apiController.text, email: _emailController.text, password: _passwordController.text);
+      await state.loginSyncAccount(email: _emailController.text, password: _passwordController.text);
     }
     if (mounted && state.cloudSyncError == null) {
       _passwordController.clear();
@@ -12289,6 +12293,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
     final state = context.watch<AppController>();
     final signedIn = state.cloudSyncEnabled && state.syncAccountEmail.isNotEmpty;
     final busy = state.cloudSyncBusy || state.syncAuthBusy;
+    final backendConfigured = CloudSyncService.configuredApiBaseUrl.trim().isNotEmpty;
     return PageScaffold(
       title: 'Account & sync',
       subtitle: signedIn ? state.syncAccountEmail : 'Multi-device online sync',
@@ -12337,13 +12342,20 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            TextField(
-              controller: _apiController,
-              enabled: !busy,
-              decoration: const InputDecoration(
-                labelText: 'Cloudflare Worker URL',
-                hintText: 'https://koinly-sync.yourname.workers.dev',
-                prefixIcon: Icon(Icons.link_rounded),
+            ExpressiveCard(
+              child: Row(
+                children: [
+                  Icon(backendConfigured ? Icons.verified_rounded : Icons.warning_rounded, color: backendConfigured ? kSleekIncome : kSleekExpense),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      backendConfigured
+                          ? 'Online sync backend is configured for this build.'
+                          : 'Online sync backend is missing. Set KOINLY_SYNC_API_BASE_URL in GitHub Actions and rebuild.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 12),
@@ -12392,12 +12404,12 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                 runSpacing: 10,
                 children: [
                   FilledButton.icon(
-                    onPressed: busy ? null : () => _login(register: false),
+                    onPressed: busy || !backendConfigured ? null : () => _login(register: false),
                     icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.login_rounded),
                     label: const Text('Sign in'),
                   ),
                   OutlinedButton.icon(
-                    onPressed: busy ? null : () => _login(register: true),
+                    onPressed: busy || !backendConfigured ? null : () => _login(register: true),
                     icon: const Icon(Icons.person_add_alt_rounded),
                     label: const Text('Create account'),
                   ),

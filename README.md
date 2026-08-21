@@ -145,9 +145,12 @@ The active user flow is:
 
 1. Open Settings.
 2. Open Account & sync.
-3. Enter the Cloudflare Worker URL.
-4. Create an account or sign in.
-5. Continue using Koinly normally.
+3. Create an account or sign in.
+4. Continue using Koinly normally.
+
+The Cloudflare Worker URL is embedded at build time through the GitHub
+Actions/Flutter define `KOINLY_SYNC_API_BASE_URL`; it is not shown as an app
+setting.
 
 Normal app operations save to local SQLite first, update the UI immediately, and add an operation to the local `sync_outbox`. The background coordinator batches pending operations, pushes them to the Worker, pulls remote changes by server cursor, and applies them locally.
 
@@ -323,11 +326,17 @@ artifacts/KoinlySetup.exe
 Workflow behavior:
 - supports manual dispatch
 - supports push to `main` or `master`
-- accepts optional Worker URL input
+- requires `KOINLY_SYNC_API_BASE_URL` as a GitHub repository secret or variable
 - preserves Android signing support
 - preserves Windows signing support
 - generates Windows installer
 - patches Windows CMake compatibility where needed
+
+App build config:
+
+```text
+KOINLY_SYNC_API_BASE_URL=https://koinly-sync-worker.koinlytest.workers.dev
+```
 
 The installer filename must stay:
 
@@ -452,7 +461,7 @@ The old `backend/cloudflare-turso/` snapshot/admin-approval backend is retained 
 ## Online sync user flow
 
 1. User opens Account & sync.
-2. User enters the Worker URL.
+2. The app uses the Worker URL embedded at build time through `KOINLY_SYNC_API_BASE_URL`.
 3. User creates an account or signs in.
 4. Existing local data is adopted into the account through the outbox.
 5. Local changes are saved immediately and synced automatically in the background.
