@@ -37,7 +37,25 @@ CLOUDFLARE_ACCOUNT_ID
 ```
 
 Create them in repo Settings > Secrets and variables > Actions. The API token
-must have permission to edit/deploy Workers on the target Cloudflare account.
+must be scoped to the target Cloudflare account and have the Cloudflare
+`Edit Cloudflare Workers` token template permissions. If you create it
+manually, include at minimum:
+
+```text
+Account  > Workers Scripts   > Edit/Write
+Account  > Account Settings  > Read
+User     > User Details      > Read
+User     > Memberships       > Read
+```
+
+If you attach the Worker to routes or a custom domain, also include:
+
+```text
+Zone     > Workers Routes    > Edit/Write
+```
+
+After changing the token in Cloudflare, replace the existing GitHub
+`CLOUDFLARE_API_TOKEN` secret with the new token value.
 
 6. Deploy:
 

@@ -43,6 +43,9 @@ jobs:
             echo "Create it in GitHub repo Settings > Secrets and variables > Actions."
             exit 1
           fi
+          echo "Cloudflare credentials are present."
+          echo "If deploy later fails with authentication code 10000, recreate CLOUDFLARE_API_TOKEN using Cloudflare's Edit Cloudflare Workers token template."
+          echo "Required permissions: Account Workers Scripts Edit/Write, Account Settings Read, User Details Read, User Memberships Read."
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

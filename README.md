@@ -399,6 +399,21 @@ CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 ```
 
+The Cloudflare API token should use the `Edit Cloudflare Workers` template
+for the target account. If you create a custom token manually, include:
+
+```text
+Account  > Workers Scripts   > Edit/Write
+Account  > Account Settings  > Read
+User     > User Details      > Read
+User     > Memberships       > Read
+```
+
+Add `Zone > Workers Routes > Edit/Write` too if you use Worker routes or a
+custom domain. If deploy fails with Cloudflare authentication code `10000`,
+replace the GitHub `CLOUDFLARE_API_TOKEN` secret with a token that has these
+permissions.
+
 Deploy from terminal:
 
 ```bash
