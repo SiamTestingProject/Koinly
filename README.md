@@ -462,9 +462,10 @@ npx wrangler deploy
 ```
 
 After deploy, open the Worker URL in a browser. `/` should return a JSON
-service summary and `/health` should report `ok: true` once Worker secrets are
-configured. Apply `cloud/worker/schema.sql` to Turso before using the Worker.
-The Flutter app needs only the deployed Worker URL in Settings > Account & sync.
+service summary and `/health` should report `ok: true`, `databaseReachable:
+true`, and `schemaReady: true`. The Worker also runs the idempotent schema
+bootstrap before auth/sync requests, so missing tables are created
+automatically if the GitHub Actions schema step was skipped.
 
 ---
 

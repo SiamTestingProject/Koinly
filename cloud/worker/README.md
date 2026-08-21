@@ -80,8 +80,13 @@ The schema file is idempotent, so it is safe to run on every deploy and will not
 erase existing sync data.
 
 6. Open the deployed Worker URL in a browser. `/` should return a JSON service
-summary. `/health` should return `ok: true` after `TURSO_DATABASE_URL`,
-`TURSO_AUTH_TOKEN`, and `JWT_SECRET` are configured.
+summary. `/health` should return `ok: true`, `databaseReachable: true`, and
+`schemaReady: true` after `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and
+`JWT_SECRET` are configured.
+
+The Worker also runs the idempotent schema bootstrap before auth/sync requests,
+so missing tables are created automatically if the GitHub Actions schema step
+was skipped.
 
 If Cloudflare shows error `1101`, check Worker logs. Most setup-time crashes
 are caused by missing Worker secrets, invalid Turso credentials, or not applying

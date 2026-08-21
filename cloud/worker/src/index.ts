@@ -26,6 +26,89 @@ type SyncOperation = {
 };
 
 const enc = new TextEncoder();
+const requiredTables = [
+  'users',
+  'refresh_tokens',
+  'devices',
+  'sync_entities',
+  'sync_changes',
+  'processed_operations',
+  'rate_limits',
+];
+
+const schemaStatements = [
+  `CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    device_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    created_at INTEGER NOT NULL,
+    rotated_at INTEGER,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS devices (
+    id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    PRIMARY KEY(user_id, id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS sync_entities (
+    user_id TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    deleted_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    last_operation_id TEXT NOT NULL,
+    PRIMARY KEY(user_id, entity_type, entity_id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS sync_changes (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    payload_json TEXT,
+    device_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    changed_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS processed_operations (
+    user_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(user_id, operation_id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS rate_limits (
+    key TEXT PRIMARY KEY,
+    window_start INTEGER NOT NULL,
+    count INTEGER NOT NULL
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id, device_id)',
+  'CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id, last_seen_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_sync_changes_user_sequence ON sync_changes(user_id, sequence)',
+  'CREATE INDEX IF NOT EXISTS idx_sync_entities_user_updated ON sync_entities(user_id, updated_at DESC)',
+];
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -39,6 +122,7 @@ export default {
 
       validateWorkerConfig(env);
       db = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
+      await ensureSchema(db);
 
       if (request.method === 'POST' && url.pathname === '/v1/auth/register') return register(request, env, db);
       if (request.method === 'POST' && url.pathname === '/v1/auth/login') return login(request, env, db);
@@ -81,13 +165,46 @@ function rootResponse(env: Env): Response {
   });
 }
 
-function healthResponse(env: Env): Response {
+async function healthResponse(env: Env): Promise<Response> {
   const configured = isWorkerConfigured(env);
-  return json({
-    ok: configured,
-    service: 'koinly-sync',
-    configured,
-  }, configured ? 200 : 503);
+  if (!configured) {
+    return json({
+      ok: false,
+      service: 'koinly-sync',
+      configured: false,
+      databaseReachable: false,
+      schemaReady: false,
+      missingTables: requiredTables,
+    }, 503);
+  }
+
+  let db: Client | undefined;
+  try {
+    db = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
+    await ensureSchema(db);
+    const missingTables = await missingSchemaTables(db);
+    const schemaReady = missingTables.length === 0;
+    return json({
+      ok: schemaReady,
+      service: 'koinly-sync',
+      configured: true,
+      databaseReachable: true,
+      schemaReady,
+      missingTables,
+    }, schemaReady ? 200 : 503);
+  } catch (error) {
+    return json({
+      ok: false,
+      service: 'koinly-sync',
+      configured: true,
+      databaseReachable: false,
+      schemaReady: false,
+      missingTables: requiredTables,
+      error: databaseErrorMessage(error),
+    }, 503);
+  } finally {
+    db?.close();
+  }
 }
 
 function isWorkerConfigured(env: Env): boolean {
@@ -104,6 +221,31 @@ function validateWorkerConfig(env: Env): void {
   if (missing.length > 0) {
     throw new HttpError(503, `Worker is missing required secret(s): ${missing.join(', ')}.`);
   }
+}
+
+async function ensureSchema(db: Client): Promise<void> {
+  try {
+    for (const statement of schemaStatements) {
+      await db.execute(statement);
+    }
+  } catch (error) {
+    throw new HttpError(503, `Turso schema/database setup failed: ${databaseErrorMessage(error)}`);
+  }
+}
+
+async function missingSchemaTables(db: Client): Promise<string[]> {
+  const rows = (await db.execute({
+    sql: `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${requiredTables.map(() => '?').join(',')})`,
+    args: requiredTables,
+  })).rows;
+  const existing = new Set(rows.map(row => String(row.name)));
+  return requiredTables.filter(table => !existing.has(table));
+}
+
+function databaseErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.trim().length === 0) return 'Unknown database error.';
+  return message.replace(/\s+/g, ' ').slice(0, 240);
 }
 
 async function register(request: Request, env: Env, db: Client): Promise<Response> {
