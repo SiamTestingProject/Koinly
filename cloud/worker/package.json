@@ -6,6 +6,7 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
+    "schema:apply": "node scripts/apply-schema.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

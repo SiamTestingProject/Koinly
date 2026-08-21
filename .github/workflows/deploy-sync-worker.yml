@@ -54,6 +54,12 @@ jobs:
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
 
+      - name: Apply Turso schema
+        run: npm run schema:apply
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+
       - name: Deploy Worker
         run: |
           trap 'rm -f .worker-secrets' EXIT

@@ -71,8 +71,13 @@ After changing the token in Cloudflare, replace the existing GitHub
 
 ```bash
 npm install
+npm run schema:apply
 npm run deploy
 ```
+
+The GitHub Actions workflow also runs `npm run schema:apply` before deploying.
+The schema file is idempotent, so it is safe to run on every deploy and will not
+erase existing sync data.
 
 6. Open the deployed Worker URL in a browser. `/` should return a JSON service
 summary. `/health` should return `ok: true` after `TURSO_DATABASE_URL`,

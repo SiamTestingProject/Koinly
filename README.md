@@ -408,6 +408,10 @@ The deploy workflow passes `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and
 --secrets-file`, so you can manage all deploy-time values from GitHub repo
 Settings > Secrets and variables > Actions.
 
+The same workflow also applies `cloud/worker/schema.sql` to Turso before
+deploying the Worker. The schema is idempotent, so rerunning the workflow keeps
+existing data and only creates missing tables/indexes.
+
 The Cloudflare API token should use the `Edit Cloudflare Workers` template
 for the target account. If you create a custom token manually, include:
 
@@ -428,6 +432,7 @@ Deploy from terminal:
 ```bash
 cd cloud/worker
 npm install
+npm run schema:apply
 npx wrangler deploy
 ```
 
