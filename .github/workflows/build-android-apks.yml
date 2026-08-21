@@ -412,3 +412,52 @@ jobs:
           name: koinly-windows-installer
           path: artifacts/KoinlySetup.exe
           if-no-files-found: error
+
+  publish-stable-release:
+    name: Publish stable GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - build-apks
+      - build-windows
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: koinly-release-apks
+          path: release-assets
+
+      - name: Download Windows installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: koinly-windows-installer
+          path: release-assets
+
+      - name: List release assets
+        run: ls -lh release-assets
+
+      - name: Publish stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f stable "$GITHUB_SHA"
+          git push origin refs/tags/stable --force
+
+          if gh release view stable >/dev/null 2>&1; then
+            gh release delete stable --yes
+          fi
+
+          gh release create stable release-assets/* \
+            --title "Koinly Stable" \
+            --notes "Stable Koinly release built from commit $GITHUB_SHA." \
+            --latest

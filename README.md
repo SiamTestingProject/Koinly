@@ -330,6 +330,7 @@ Workflow behavior:
 - preserves Android signing support
 - preserves Windows signing support
 - generates Windows installer
+- publishes APKs and `KoinlySetup.exe` to the `Koinly Stable` GitHub Release
 - patches Windows CMake compatibility where needed
 
 App build config:
@@ -343,6 +344,21 @@ The installer filename must stay:
 ```text
 KoinlySetup.exe
 ```
+
+Stable release publishing:
+
+```text
+Tag: stable
+Release title: Koinly Stable
+Assets:
+- koinly-universal-release.apk
+- koinly-armeabi-v7a-release.apk
+- koinly-arm64-v8a-release.apk
+- KoinlySetup.exe
+```
+
+Each successful build updates the `stable` tag to the current commit and
+replaces the assets on the `Koinly Stable` release.
 
 ---
 
