@@ -124,16 +124,16 @@ export default {
       db = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
       await ensureSchema(db);
 
-      if (request.method === 'POST' && url.pathname === '/v1/auth/register') return register(request, env, db);
-      if (request.method === 'POST' && url.pathname === '/v1/auth/login') return login(request, env, db);
-      if (request.method === 'POST' && url.pathname === '/v1/auth/refresh') return refresh(request, env, db);
+      if (request.method === 'POST' && url.pathname === '/v1/auth/register') return await register(request, env, db);
+      if (request.method === 'POST' && url.pathname === '/v1/auth/login') return await login(request, env, db);
+      if (request.method === 'POST' && url.pathname === '/v1/auth/refresh') return await refresh(request, env, db);
 
       const auth = await requireAuth(request, env);
-      if (request.method === 'POST' && url.pathname === '/v1/auth/logout') return logout(request, db, auth);
-      if (request.method === 'POST' && url.pathname === '/v1/sync/initial') return initialSync(request, db, auth);
-      if (request.method === 'POST' && url.pathname === '/v1/sync/push') return push(request, env, db, auth);
-      if (request.method === 'GET' && url.pathname === '/v1/sync/pull') return pull(url, env, db, auth);
-      if (request.method === 'GET' && url.pathname === '/v1/sync/status') return status(db, auth);
+      if (request.method === 'POST' && url.pathname === '/v1/auth/logout') return await logout(request, db, auth);
+      if (request.method === 'POST' && url.pathname === '/v1/sync/initial') return await initialSync(request, db, auth);
+      if (request.method === 'POST' && url.pathname === '/v1/sync/push') return await push(request, env, db, auth);
+      if (request.method === 'GET' && url.pathname === '/v1/sync/pull') return await pull(url, env, db, auth);
+      if (request.method === 'GET' && url.pathname === '/v1/sync/status') return await status(db, auth);
 
       return json({ error: 'Not found.' }, 404);
     } catch (error) {
