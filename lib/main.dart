@@ -2226,8 +2226,17 @@ class KoinlySyncApi {
   }
 
   Map<String, dynamic> _decodeResponse(http.Response response) {
-    final decoded = response.body.trim().isEmpty ? <String, dynamic>{} : jsonDecode(response.body);
-    final data = decoded is Map ? decoded.cast<String, dynamic>() : <String, dynamic>{};
+    Map<String, dynamic> data = <String, dynamic>{};
+    final rawBody = response.body.trim();
+    if (rawBody.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawBody);
+        data = decoded is Map ? decoded.cast<String, dynamic>() : <String, dynamic>{};
+      } catch (_) {
+        final compactBody = rawBody.replaceAll(RegExp(r'\s+'), ' ');
+        data = <String, dynamic>{'error': compactBody.length <= 240 ? compactBody : compactBody.substring(0, 240)};
+      }
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw CloudSyncException(data['error']?.toString() ?? 'Request failed (${response.statusCode}).');
     }

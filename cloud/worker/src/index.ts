@@ -259,7 +259,7 @@ async function register(request: Request, env: Env, db: Client): Promise<Respons
 
   const now = Date.now();
   const userId = crypto.randomUUID();
-  const passwordHash = await hashPassword(password);
+  const passwordHash = await hashPassword(password, env.JWT_SECRET);
   try {
     await db.batch([
       {
@@ -271,8 +271,12 @@ async function register(request: Request, env: Env, db: Client): Promise<Respons
         args: [deviceId, userId, deviceName, platform, now, now],
       },
     ], 'write');
-  } catch {
-    throw new HttpError(409, 'An account already exists for this email.');
+  } catch (error) {
+    const message = databaseErrorMessage(error);
+    if (message.toLowerCase().includes('unique') || message.toLowerCase().includes('constraint')) {
+      throw new HttpError(409, 'An account already exists for this email.');
+    }
+    throw new HttpError(503, `Could not create sync account: ${message}`);
   }
   return issueTokens(env, db, { userId, email, deviceId });
 }
@@ -286,7 +290,7 @@ async function login(request: Request, env: Env, db: Client): Promise<Response> 
   const platform = cleanText(body.platform, 40) || 'unknown';
 
   const row = (await db.execute({ sql: 'SELECT id, email, password_hash FROM users WHERE email = ?', args: [email] })).rows[0];
-  if (!row || !(await verifyPassword(password, String(row.password_hash)))) {
+  if (!row || !(await verifyPassword(password, String(row.password_hash), env.JWT_SECRET))) {
     throw new HttpError(401, 'Invalid email or password.');
   }
 
@@ -492,18 +496,24 @@ async function signDetached(secret: string, value: string): Promise<string> {
   return b64urlBytes(await crypto.subtle.sign('HMAC', key, enc.encode(value)));
 }
 
-async function hashPassword(password: string): Promise<string> {
+async function hashPassword(password: string, pepper: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 210000 }, key, 256);
-  return `pbkdf2$210000$${b64urlBytes(salt)}$${b64urlBytes(bits)}`;
+  const saltRaw = b64urlBytes(salt);
+  return `s256$${saltRaw}$${await sha256(`${saltRaw}.${pepper}.${password}`)}`;
 }
 
-async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const [scheme, iterationsRaw, saltRaw, hashRaw] = stored.split('$');
+async function verifyPassword(password: string, stored: string, pepper: string): Promise<boolean> {
+  const [scheme, first, second, third] = stored.split('$');
+  if (scheme === 's256') {
+    return await sha256(`${first}.${pepper}.${password}`) === second;
+  }
   if (scheme !== 'pbkdf2') return false;
-  const salt = bytesFromB64Url(saltRaw);
+  const iterationsRaw = first;
+  const saltRaw = second;
+  const hashRaw = third;
+  if (!iterationsRaw || !saltRaw || !hashRaw) return false;
   const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const salt = bytesFromB64Url(saltRaw);
   const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: Number(iterationsRaw) }, key, 256);
   return b64urlBytes(bits) === hashRaw;
 }
