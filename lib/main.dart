@@ -35,22 +35,31 @@ import 'package:timezone/timezone.dart' as tz;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
+import 'update_service.dart';
+
 const _uuid = Uuid();
 
-const Color kSleekBackground = Color(0xFF061012);
-const Color kSleekSurface = Color(0xFF10191D);
-const Color kSleekSurfaceHigh = Color(0xFF162226);
-const Color kSleekSurfaceHigher = Color(0xFF1B2A2F);
-const Color kSleekAccent = Color(0xFF00C7D8);
+const Color kSleekBackground = Color(0xFF020B0F);
+const Color kSleekSurface = Color(0xFF07171D);
+const Color kSleekSurfaceHigh = Color(0xFF0C2028);
+const Color kSleekSurfaceHigher = Color(0xFF132B34);
+const Color kSleekAccent = Color(0xFF00D7E8);
 const Color kSleekIncome = Color(0xFF27D17F);
 const Color kSleekExpense = Color(0xFFFF5353);
 const Color kSleekWarning = Color(0xFFF59E0B);
-const Color kSleekMuted = Color(0xFF7C8A92);
+const Color kSleekMuted = Color(0xFF90A4AD);
 
 const appTitle = 'Koinly';
 const appVersion = String.fromEnvironment('KOINLY_APP_VERSION', defaultValue: '1.0.70');
 const backupPassword = 'YOUR_SECRET_PASSWORD';
 const kSyncAdminTelegramUrl = 'https://t.me/Ch0wdhury_Siam';
+final bool kLoansFeatureEnabled = bool.fromEnvironment('KOINLY_ENABLE_LOANS', defaultValue: false);
+
+const int kHomeTabIndex = 0;
+const int kAnalysisTabIndex = 1;
+int get kLoansTabIndex => 2;
+int get kTransactionTabIndex => kLoansFeatureEnabled ? 3 : 2;
+int get kCategoriesTabIndex => kLoansFeatureEnabled ? 4 : 3;
 
 bool get kUsesDesktopSqlite => !kIsWeb && (Platform.isWindows || Platform.isLinux);
 bool get kIsDesktopApp => !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
@@ -2505,6 +2514,8 @@ class AppController extends ChangeNotifier {
   final database = KoinlyDatabase();
   final prefs = PrefsStore();
   final secureCredentials = SecureCredentialStore();
+  static final NumberFormat _groupedAmountFormatter = NumberFormat('#,##0.##');
+  static final NumberFormat _plainAmountFormatter = NumberFormat('0.##');
 
   bool loading = true;
   bool onboardingCompleted = false;
@@ -2524,6 +2535,21 @@ class AppController extends ChangeNotifier {
   List<String> plannedSavingsIdeas = [];
   List<String> seenSavingsSuggestionKeys = [];
   List<String> dismissedFinancialHealthSummaryKeys = [];
+  Map<String, Account> _accountsById = {};
+  Map<String, Category> _categoriesById = {};
+  Map<String, Loan> _loansById = {};
+  Map<String, List<LoanRepaymentReminder>> _loanRemindersByLoanId = {};
+  Map<CategoryType, Set<String>> _categoryIdsByType = {
+    CategoryType.income: <String>{},
+    CategoryType.expense: <String>{},
+  };
+  List<Account> _operatingAccounts = [];
+  List<Account> _savingAccounts = [];
+  List<LoanRepaymentReminder> _overdueLoanReminders = [];
+  List<LoanRepaymentReminder> _dueTodayLoanReminders = [];
+  double _operatingAccountBalance = 0;
+  double _savingAccountBalance = 0;
+  double _totalAccountBalance = 0;
 
   ThemePreference themePreference = ThemePreference.system;
   String currencySymbol = '৳';
@@ -2561,6 +2587,7 @@ class AppController extends ChangeNotifier {
   String? cloudSyncError;
   String? cloudSyncErrorCode;
   DateTime? cloudSyncLastAt;
+  bool _syncInProgress = false;
   Timer? _cloudSyncDebounce;
   Timer? _cloudSyncRetryTimer;
   String syncAccountEmail = '';
@@ -2569,11 +2596,42 @@ class AppController extends ChangeNotifier {
   String syncDeviceId = '';
   String syncStatus = 'Offline';
   bool syncAuthBusy = false;
+  final GithubUpdateService updateService = GithubUpdateService();
+  UpdateCheckOutcome updateCheckOutcome = UpdateCheckOutcome.noReleaseAvailable;
+  bool updateCheckBusy = false;
+  bool updateDownloadBusy = false;
+  String updateStatusMessage = 'Not checked yet.';
+  DateTime? updateLastCheckedAt;
+  GithubRelease? latestGithubRelease;
+  UpdateAssetKind selectedAndroidUpdateKind = UpdateAssetKind.arm64;
+  DownloadProgressSnapshot? updateDownloadProgress;
+  String pendingAndroidUpdatePath = '';
+  String pendingAndroidUpdateVersion = '';
+  UpdateAssetKind? pendingAndroidUpdateKind;
+  String? _shownUpdateDialogVersionThisSession;
+  http.Client? _updateDownloadClient;
 
   bool get setupCompletedForCurrentPlatform {
     if (!onboardingCompleted) return false;
     if (!kIsDesktopApp) return true;
     return desktopSetupVersionCompleted >= kRequiredDesktopSetupVersion;
+  }
+
+  Future<void> unlockApp() async {
+    authenticated = await authenticate();
+    notifyListeners();
+  }
+
+  void selectTabIndex(int index) {
+    if (tabIndex == index) return;
+    tabIndex = index;
+    notifyListeners();
+  }
+
+  void selectLoanTab(LoanType type) {
+    activeLoanType = type;
+    tabIndex = 2;
+    notifyListeners();
   }
 
   Future<void> initialize() async {
@@ -2667,6 +2725,13 @@ class AppController extends ChangeNotifier {
     cloudSyncLastAt = lastSyncRaw.isEmpty ? null : DateTime.tryParse(lastSyncRaw);
     cloudSyncPending = await prefs.getBool('cloudSyncPending', false);
     syncStatus = cloudSyncEnabled ? cloudSyncStatusText : 'Offline';
+    pendingAndroidUpdatePath = await prefs.getString('pendingAndroidUpdatePath', '');
+    pendingAndroidUpdateVersion = await prefs.getString('pendingAndroidUpdateVersion', '');
+    final pendingKindName = await prefs.getString('pendingAndroidUpdateKind', '');
+    pendingAndroidUpdateKind = pendingKindName.isEmpty ? null : enumByName(UpdateAssetKind.values, pendingKindName, UpdateAssetKind.arm64);
+    if (pendingAndroidUpdatePath.isNotEmpty && !await File(pendingAndroidUpdatePath).exists()) {
+      await _clearPendingAndroidUpdate();
+    }
   }
 
   Future<Map<String, dynamic>> exportPreferences() async => {
@@ -2736,6 +2801,275 @@ class AppController extends ChangeNotifier {
   }
 
   bool get cloudSyncApprovalRequired => cloudSyncErrorCode == 'SYNC_APPROVAL_REQUIRED';
+
+  bool get hasAvailableUpdate => updateCheckOutcome == UpdateCheckOutcome.updateAvailable && latestGithubRelease != null;
+  bool get hasPendingAndroidUpdate => pendingAndroidUpdatePath.isNotEmpty && pendingAndroidUpdateVersion.isNotEmpty;
+
+  Map<UpdateAssetKind, ReleaseAsset> get availableAndroidUpdateAssets {
+    final release = latestGithubRelease;
+    if (release == null) return const {};
+    return ReleaseAssetMatcher.androidApks(release);
+  }
+
+  ReleaseAsset? get selectedAndroidUpdateAsset => availableAndroidUpdateAssets[selectedAndroidUpdateKind] ?? availableAndroidUpdateAssets[UpdateAssetKind.universal];
+
+  ReleaseAsset? get windowsUpdateInstallerAsset {
+    final release = latestGithubRelease;
+    if (release == null) return null;
+    return ReleaseAssetMatcher.preferredWindowsInstaller(release);
+  }
+
+  bool canShowStartupUpdateDialog(GithubRelease release) => _shownUpdateDialogVersionThisSession != release.displayVersion;
+
+  void markStartupUpdateDialogShown(GithubRelease release) {
+    _shownUpdateDialogVersionThisSession = release.displayVersion;
+  }
+
+  void selectAndroidUpdateKind(UpdateAssetKind kind) {
+    selectedAndroidUpdateKind = kind;
+    notifyListeners();
+  }
+
+  Future<UpdateCheckResult> checkForUpdates({bool manual = false}) async {
+    if (updateCheckBusy) {
+      return UpdateCheckResult(outcome: updateCheckOutcome, release: latestGithubRelease, message: updateStatusMessage);
+    }
+    updateCheckBusy = true;
+    updateStatusMessage = manual ? 'Checking GitHub releases now...' : 'Checking GitHub releases...';
+    notifyListeners();
+    final result = await updateService.check(installedVersion: appVersion);
+    updateCheckBusy = false;
+    updateCheckOutcome = result.outcome;
+    latestGithubRelease = result.release;
+    updateLastCheckedAt = DateTime.now();
+    updateStatusMessage = result.message.isEmpty ? _friendlyUpdateOutcome(result.outcome) : result.message;
+    if (result.hasUpdate && Platform.isAndroid) {
+      final assets = availableAndroidUpdateAssets;
+      if (assets.containsKey(UpdateAssetKind.arm64)) {
+        selectedAndroidUpdateKind = UpdateAssetKind.arm64;
+      } else if (assets.isNotEmpty) {
+        selectedAndroidUpdateKind = assets.keys.first;
+      }
+      if (pendingAndroidUpdateVersion.isNotEmpty && pendingAndroidUpdateVersion != result.release!.displayVersion) {
+        await _clearPendingAndroidUpdate(deleteFile: true);
+        await UpdateDownloadStore.cleanupStaleAndroidUpdates(keepVersion: result.release!.displayVersion);
+      }
+    }
+    notifyListeners();
+    return result;
+  }
+
+  String _friendlyUpdateOutcome(UpdateCheckOutcome outcome) {
+    switch (outcome) {
+      case UpdateCheckOutcome.updateAvailable:
+        return 'A new update is available.';
+      case UpdateCheckOutcome.upToDate:
+        return 'You are up to date.';
+      case UpdateCheckOutcome.noReleaseAvailable:
+        return 'No stable release is available yet.';
+      case UpdateCheckOutcome.networkError:
+        return 'Could not connect to GitHub. Check your internet and try again.';
+      case UpdateCheckOutcome.rateLimited:
+        return 'GitHub rate limit reached. Please try again later.';
+      case UpdateCheckOutcome.malformedData:
+        return 'GitHub returned release data that Koinly could not read.';
+      case UpdateCheckOutcome.httpError:
+        return 'GitHub update check failed.';
+    }
+  }
+
+  Future<void> downloadSelectedAndroidUpdate() async {
+    if (!Platform.isAndroid) {
+      updateStatusMessage = 'In-app APK installation is available on Android only.';
+      notifyListeners();
+      return;
+    }
+    final release = latestGithubRelease;
+    final asset = selectedAndroidUpdateAsset;
+    if (release == null || asset == null) {
+      updateStatusMessage = 'This release does not include a matching Android APK.';
+      notifyListeners();
+      return;
+    }
+    if (!ReleaseAssetMatcher.isTrustedReleaseAssetUrl(asset.browserDownloadUrl)) {
+      updateStatusMessage = 'Update asset is not from the configured GitHub release repository.';
+      notifyListeners();
+      return;
+    }
+
+    await UpdateDownloadStore.cleanupStaleAndroidUpdates(keepVersion: release.displayVersion);
+    await UpdateDownloadStore.cleanupPartialFiles();
+    final apkFile = await UpdateDownloadStore.androidApkFile(release: release, kind: selectedAndroidUpdateKind, asset: asset);
+    final partialFile = File('${apkFile.path}.part');
+    if (await apkFile.exists()) {
+      await _savePendingAndroidUpdate(path: apkFile.path, version: release.displayVersion, kind: selectedAndroidUpdateKind);
+      await installPendingAndroidUpdate();
+      return;
+    }
+
+    _updateDownloadClient?.close();
+    _updateDownloadClient = http.Client();
+    updateDownloadBusy = true;
+    final startedAt = DateTime.now();
+    updateDownloadProgress = DownloadProgressSnapshot(
+      receivedBytes: 0,
+      totalBytes: asset.sizeBytes,
+      startedAt: startedAt,
+      now: startedAt,
+    );
+    updateStatusMessage = 'Downloading ${selectedAndroidUpdateKind.label} update...';
+    notifyListeners();
+
+    IOSink? sink;
+    try {
+      final request = http.Request('GET', Uri.parse(asset.browserDownloadUrl))
+        ..headers.addAll(const {'Accept': 'application/octet-stream', 'User-Agent': 'Koinly-Updater'});
+      final response = await _updateDownloadClient!.send(request).timeout(const Duration(seconds: 20));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException('HTTP ${response.statusCode}');
+      }
+      final total = response.contentLength ?? asset.sizeBytes;
+      sink = partialFile.openWrite();
+      var received = 0;
+      var lastNotify = DateTime.now();
+      await for (final chunk in response.stream) {
+        received += chunk.length;
+        sink.add(chunk);
+        final now = DateTime.now();
+        if (now.difference(lastNotify).inMilliseconds >= 140 || received == total) {
+          updateDownloadProgress = DownloadProgressSnapshot(
+            receivedBytes: received,
+            totalBytes: total,
+            startedAt: startedAt,
+            now: now,
+          );
+          lastNotify = now;
+          notifyListeners();
+        }
+      }
+      await sink.close();
+      sink = null;
+      if (await apkFile.exists()) await apkFile.delete();
+      await partialFile.rename(apkFile.path);
+      updateDownloadProgress = DownloadProgressSnapshot(
+        receivedBytes: total <= 0 ? received : total,
+        totalBytes: total <= 0 ? received : total,
+        startedAt: startedAt,
+        now: DateTime.now(),
+        status: 'Complete',
+      );
+      updateStatusMessage = 'Download complete. Opening Android installer...';
+      updateDownloadBusy = false;
+      await _savePendingAndroidUpdate(path: apkFile.path, version: release.displayVersion, kind: selectedAndroidUpdateKind);
+      notifyListeners();
+      await installPendingAndroidUpdate();
+    } catch (_) {
+      try {
+        await sink?.close();
+      } catch (_) {}
+      updateDownloadBusy = false;
+      updateDownloadProgress = null;
+      updateStatusMessage = 'Download failed or was interrupted. Please try again.';
+      if (await partialFile.exists()) {
+        try {
+          await partialFile.delete();
+        } catch (_) {}
+      }
+      notifyListeners();
+    }
+  }
+
+  Future<void> cancelUpdateDownload() async {
+    _updateDownloadClient?.close();
+    _updateDownloadClient = null;
+    updateDownloadBusy = false;
+    updateDownloadProgress = null;
+    updateStatusMessage = 'Download cancelled.';
+    await UpdateDownloadStore.cleanupPartialFiles();
+    notifyListeners();
+  }
+
+  Future<void> installPendingAndroidUpdate() async {
+    if (!Platform.isAndroid) return;
+    if (pendingAndroidUpdatePath.isEmpty || !await File(pendingAndroidUpdatePath).exists()) {
+      await _clearPendingAndroidUpdate();
+      updateStatusMessage = 'Downloaded update was not found. Please download it again.';
+      notifyListeners();
+      return;
+    }
+    try {
+      final allowed = await AndroidUpdateInstaller.canInstallPackages();
+      if (!allowed) {
+        updateStatusMessage = 'Allow Koinly to install unknown apps, then return here to continue.';
+        notifyListeners();
+        await AndroidUpdateInstaller.openInstallPermissionSettings();
+        return;
+      }
+      final opened = await AndroidUpdateInstaller.installApk(pendingAndroidUpdatePath);
+      updateStatusMessage = opened ? 'Android installer opened. Complete installation to update Koinly.' : 'Could not open Android installer.';
+      notifyListeners();
+    } catch (_) {
+      updateStatusMessage = 'Could not open Android installer. Please try again.';
+      notifyListeners();
+    }
+  }
+
+  Future<void> resumePendingAndroidInstallIfAllowed() async {
+    if (!Platform.isAndroid || pendingAndroidUpdatePath.isEmpty || updateDownloadBusy) return;
+    try {
+      if (await AndroidUpdateInstaller.canInstallPackages()) {
+        await installPendingAndroidUpdate();
+      }
+    } catch (_) {
+      // Keep the pending APK so the user can retry from Settings > Updates.
+    }
+  }
+
+  Future<void> openWindowsUpdate() async {
+    final release = latestGithubRelease;
+    if (release == null) {
+      updateStatusMessage = 'No release is available to open.';
+      notifyListeners();
+      return;
+    }
+    final asset = windowsUpdateInstallerAsset;
+    final url = asset?.browserDownloadUrl ?? release.htmlUrl;
+    if (url.trim().isEmpty) {
+      updateStatusMessage = 'This release does not include a Windows installer link.';
+      notifyListeners();
+      return;
+    }
+    final launched = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    updateStatusMessage = launched ? 'Windows installer opened externally.' : 'Could not open the Windows update link.';
+    notifyListeners();
+  }
+
+  Future<void> _savePendingAndroidUpdate({required String path, required String version, required UpdateAssetKind kind}) async {
+    pendingAndroidUpdatePath = path;
+    pendingAndroidUpdateVersion = version;
+    pendingAndroidUpdateKind = kind;
+    await prefs.setString('pendingAndroidUpdatePath', path);
+    await prefs.setString('pendingAndroidUpdateVersion', version);
+    await prefs.setString('pendingAndroidUpdateKind', enumName(kind));
+  }
+
+  Future<void> _clearPendingAndroidUpdate({bool deleteFile = false}) async {
+    if (deleteFile && pendingAndroidUpdatePath.isNotEmpty) {
+      final file = File(pendingAndroidUpdatePath);
+      if (await file.exists()) {
+        try {
+          await file.delete();
+        } catch (_) {}
+      }
+    }
+    pendingAndroidUpdatePath = '';
+    pendingAndroidUpdateVersion = '';
+    pendingAndroidUpdateKind = null;
+    final sp = await prefs.prefs;
+    await sp.remove('pendingAndroidUpdatePath');
+    await sp.remove('pendingAndroidUpdateVersion');
+    await sp.remove('pendingAndroidUpdateKind');
+  }
 
   Future<void> configureCloudSync({required bool enabled, required String apiBaseUrl, required String syncId, required String pin}) async {
     // Automatic sync is always on once an online sync method is configured.
@@ -3001,14 +3335,15 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> performMultiDeviceSync({bool silent = false, bool pushLocalChanges = true}) async {
-    if (cloudSyncBusy || !_hasConfiguredSyncTarget()) return;
-    cloudSyncBusy = true;
+    if (_syncInProgress || cloudSyncBusy || !_hasConfiguredSyncTarget()) return;
+    _syncInProgress = true;
+    cloudSyncBusy = !silent;
     if (!silent) {
       cloudSyncError = null;
       cloudSyncErrorCode = null;
+      syncStatus = 'Syncing...';
+      notifyListeners();
     }
-    syncStatus = 'Syncing...';
-    notifyListeners();
     try {
       final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
       if (pushLocalChanges) {
@@ -3051,7 +3386,8 @@ class AppController extends ChangeNotifier {
         }
       }
 
-      var cursor = 0;
+      final replaceLocalData = !pushLocalChanges;
+      var cursor = replaceLocalData ? 0 : (int.tryParse(await database.readSyncState('serverCursor', '0')) ?? 0);
       var hasMore = true;
       final remoteChanges = <Map<String, dynamic>>[];
       while (hasMore) {
@@ -3061,8 +3397,12 @@ class AppController extends ChangeNotifier {
         cursor = (response['cursor'] as num? ?? cursor).toInt();
         hasMore = response['hasMore'] == true;
       }
-      await database.clearFinanceDataForRemoteLogin();
-      await database.applyRemoteChanges(remoteChanges, importPreferences);
+      if (replaceLocalData) {
+        await database.clearFinanceDataForRemoteLogin();
+      }
+      if (remoteChanges.isNotEmpty) {
+        await database.applyRemoteChanges(remoteChanges, importPreferences);
+      }
       await database.writeSyncState('serverCursor', '$cursor');
 
       cloudSyncLastAt = DateTime.now();
@@ -3071,11 +3411,14 @@ class AppController extends ChangeNotifier {
       cloudSyncError = null;
       cloudSyncErrorCode = null;
       syncStatus = 'Synced';
-      await reload();
+      if (replaceLocalData || remoteChanges.isNotEmpty) {
+        await reload();
+      }
     } catch (error) {
       final text = _cleanSyncError(error);
       if (text.toLowerCase().contains('expired') || text.toLowerCase().contains('access token')) {
         await _refreshSyncSession();
+        _syncInProgress = false;
         cloudSyncBusy = false;
         await performMultiDeviceSync(silent: silent, pushLocalChanges: pushLocalChanges);
         return;
@@ -3088,8 +3431,11 @@ class AppController extends ChangeNotifier {
       }
       syncStatus = 'Sync error';
     } finally {
+      _syncInProgress = false;
       cloudSyncBusy = false;
-      notifyListeners();
+      if (!silent) {
+        notifyListeners();
+      }
     }
   }
 
@@ -3170,6 +3516,8 @@ class AppController extends ChangeNotifier {
   void dispose() {
     _cloudSyncDebounce?.cancel();
     _cloudSyncRetryTimer?.cancel();
+    _updateDownloadClient?.close();
+    updateService.close();
     super.dispose();
   }
 
@@ -3180,11 +3528,36 @@ class AppController extends ChangeNotifier {
     budgets = await database.budgets();
     loans = await database.loans();
     loanRepaymentReminders = await database.loanRepaymentReminders();
+    _rebuildLookupCaches();
     defaultAccountId ??= accounts.where((a) => a.type != AccountType.savings).firstOrNull?.id ?? accounts.firstOrNull?.id;
     defaultExpenseCategoryId ??= categories.where((c) => c.type == CategoryType.expense && !c.isLoanSystemCategory).firstOrNull?.id;
     defaultIncomeCategoryId ??= categories.where((c) => c.type == CategoryType.income && !c.isLoanSystemCategory).firstOrNull?.id;
     notifyListeners();
     if (queueSync) queueCloudSync();
+  }
+
+  void _rebuildLookupCaches() {
+    _accountsById = {for (final account in accounts) account.id: account};
+    _categoriesById = {for (final category in categories) category.id: category};
+    _loansById = {for (final loan in loans) loan.id: loan};
+    _operatingAccounts = accounts.where((a) => a.type != AccountType.savings).toList(growable: false);
+    _savingAccounts = accounts.where((a) => a.type == AccountType.savings).toList(growable: false);
+    _operatingAccountBalance = _operatingAccounts.fold<double>(0, (sum, account) => sum + account.amount);
+    _savingAccountBalance = _savingAccounts.fold<double>(0, (sum, account) => sum + account.amount);
+    _totalAccountBalance = accounts.fold<double>(0, (sum, account) => sum + account.amount);
+    _categoryIdsByType = {
+      CategoryType.income: categories.where((c) => c.type == CategoryType.income).map((c) => c.id).toSet(),
+      CategoryType.expense: categories.where((c) => c.type == CategoryType.expense).map((c) => c.id).toSet(),
+    };
+    final remindersByLoan = <String, List<LoanRepaymentReminder>>{};
+    for (final reminder in loanRepaymentReminders) {
+      (remindersByLoan[reminder.loanId] ??= <LoanRepaymentReminder>[]).add(reminder);
+    }
+    _loanRemindersByLoanId = {
+      for (final entry in remindersByLoan.entries) entry.key: List<LoanRepaymentReminder>.unmodifiable(entry.value),
+    };
+    _overdueLoanReminders = loanRepaymentReminders.where((r) => r.isOverdue).toList(growable: false);
+    _dueTodayLoanReminders = loanRepaymentReminders.where((r) => r.isDueToday).toList(growable: false);
   }
 
   Future<void> skipStarterAccounts() async {
@@ -3236,25 +3609,25 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Account? accountOf(String id) => accounts.where((a) => a.id == id).firstOrNull;
-  Category? categoryOf(String id) => categories.where((c) => c.id == id).firstOrNull;
-  Loan? loanOf(String id) => loans.where((l) => l.id == id).firstOrNull;
-  List<LoanRepaymentReminder> loanRemindersFor(String loanId) => loanRepaymentReminders.where((r) => r.loanId == loanId).toList();
-  List<LoanRepaymentReminder> get overdueLoanReminders => loanRepaymentReminders.where((r) => r.isOverdue).toList();
-  List<LoanRepaymentReminder> get dueTodayLoanReminders => loanRepaymentReminders.where((r) => r.isDueToday).toList();
+  Account? accountOf(String id) => _accountsById[id];
+  Category? categoryOf(String id) => _categoriesById[id];
+  Loan? loanOf(String id) => _loansById[id];
+  List<LoanRepaymentReminder> loanRemindersFor(String loanId) => _loanRemindersByLoanId[loanId] ?? const [];
+  List<LoanRepaymentReminder> get overdueLoanReminders => _overdueLoanReminders;
+  List<LoanRepaymentReminder> get dueTodayLoanReminders => _dueTodayLoanReminders;
 
-  List<Account> get operatingAccounts => accounts.where((a) => a.type != AccountType.savings).toList();
-  List<Account> get savingAccounts => accounts.where((a) => a.type == AccountType.savings).toList();
-  double get operatingAccountBalance => operatingAccounts.fold<double>(0, (sum, account) => sum + account.amount);
-  double get savingAccountBalance => savingAccounts.fold<double>(0, (sum, account) => sum + account.amount);
+  List<Account> get operatingAccounts => _operatingAccounts;
+  List<Account> get savingAccounts => _savingAccounts;
+  double get operatingAccountBalance => _operatingAccountBalance;
+  double get savingAccountBalance => _savingAccountBalance;
 
-  double get totalAccountBalance => accounts.fold<double>(0, (sum, account) => sum + account.amount);
+  double get totalAccountBalance => _totalAccountBalance;
 
   String format(double amount) {
     if (amountsHidden) {
       return currencyPosition == CurrencyPosition.prefix ? '$currencySymbol••••' : '••••$currencySymbol';
     }
-    final formatter = NumberFormat(useSeparators ? '#,##0.##' : '0.##');
+    final formatter = useSeparators ? _groupedAmountFormatter : _plainAmountFormatter;
     final num = formatter.format(amount.abs());
     final sign = amount < 0 ? '-' : '';
     return currencyPosition == CurrencyPosition.prefix ? '$sign$currencySymbol$num' : '$sign$num$currencySymbol';
@@ -3275,7 +3648,6 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> markSavingsSuggestionSeenToday(String id) async {
-    final today = savingsSuggestionDayKey();
     final recentKeys = seenSavingsSuggestionKeys.where((key) {
       final parts = key.split('::');
       if (parts.length != 2) return false;
@@ -3379,10 +3751,10 @@ class AppController extends ChangeNotifier {
     return Summary(income: income, expense: expense);
   }
 
-  Map<String, double> categoryTotals(CategoryType type, {bool ignoreDate = false}) {
-    final ids = categories.where((c) => c.type == type).map((c) => c.id).toSet();
+  Map<String, double> categoryTotals(CategoryType type, {bool ignoreDate = false, List<MoneyTransaction>? source}) {
+    final ids = _categoryIdsByType[type] ?? const <String>{};
     final result = <String, double>{};
-    for (final tx in filteredTransactions(ignoreDate: ignoreDate)) {
+    for (final tx in source ?? filteredTransactions(ignoreDate: ignoreDate)) {
       if (!ids.contains(tx.categoryId)) continue;
       if (type == CategoryType.income && !tx.countsAsIncome) continue;
       if (type == CategoryType.expense && !tx.countsAsExpense) continue;
@@ -3873,12 +4245,12 @@ class KoinlyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
+    final themeMode = context.select<AppController, ThemeMode>((state) => state.themeMode);
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       scrollBehavior: const KoinlyScrollBehavior(),
       title: appTitle,
-      themeMode: state.themeMode,
+      themeMode: themeMode,
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),
       home: const StartupGate(),
@@ -3907,13 +4279,13 @@ class KoinlyApp extends StatelessWidget {
             secondary: const Color(0xFF2BD9A1),
             tertiary: const Color(0xFFFF5C7A),
             surface: kSleekSurface,
-            surfaceContainerLow: const Color(0xFF0B1619),
-            surfaceContainer: const Color(0xFF101B1F),
+            surfaceContainerLow: const Color(0xFF061319),
+            surfaceContainer: const Color(0xFF0A1B22),
             surfaceContainerHigh: kSleekSurfaceHigh,
             surfaceContainerHighest: kSleekSurfaceHigher,
             background: kSleekBackground,
-            outline: const Color(0xFF2A3940),
-            outlineVariant: const Color(0xFF1D2A30),
+            outline: const Color(0xFF28414A),
+            outlineVariant: const Color(0xFF183039),
           )
         : baseScheme.copyWith(
             primary: kSleekAccent,
@@ -4021,7 +4393,7 @@ class KoinlyApp extends StatelessWidget {
         unselectedLabelTextStyle: TextStyle(color: scheme.onSurfaceVariant.withOpacity(.82), fontWeight: FontWeight.w800, fontSize: 11),
       ),
       navigationBarTheme: NavigationBarThemeData(
-        backgroundColor: isDark ? const Color(0xEE0B1417) : Colors.white.withOpacity(.96),
+        backgroundColor: isDark ? const Color(0xE607171D) : Colors.white.withOpacity(.96),
         indicatorColor: kSleekAccent.withOpacity(isDark ? .24 : .18),
         height: 78,
         elevation: 0,
@@ -4113,7 +4485,7 @@ class KoinlyApp extends StatelessWidget {
         centerTitle: false,
         elevation: 0,
         scrolledUnderElevation: 0,
-        backgroundColor: scheme.background,
+        backgroundColor: Colors.transparent,
         surfaceTintColor: Colors.transparent,
         iconTheme: IconThemeData(color: scheme.onSurface),
         titleTextStyle: textTheme.headlineSmall?.copyWith(color: scheme.onSurface, fontWeight: FontWeight.w900, letterSpacing: -.6),
@@ -4143,10 +4515,12 @@ class StartupGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
-    if (state.loading) return const SplashScreen();
-    if (!state.authenticated) return const LockScreen();
-    if (!state.setupCompletedForCurrentPlatform) return const OnboardingScreen();
+    final gate = context.select<AppController, ({bool loading, bool authenticated, bool setupCompleted})>(
+      (state) => (loading: state.loading, authenticated: state.authenticated, setupCompleted: state.setupCompletedForCurrentPlatform),
+    );
+    if (gate.loading) return const SplashScreen();
+    if (!gate.authenticated) return const LockScreen();
+    if (!gate.setupCompleted) return const OnboardingScreen();
     return const FinancialHealthReviewGate(child: MainShell());
   }
 }
@@ -4223,18 +4597,18 @@ bool financialHealthSummaryHasActivity(AppController state, FinancialHealthRevie
       summary.expense > 0 ||
       summary.savingsIn > 0 ||
       summary.savingsOut > 0 ||
-      summary.loansGiven > 0 ||
-      summary.loansTaken > 0 ||
-      summary.loanRepaymentPaid > 0 ||
-      summary.loanRepaymentReceived > 0 ||
+      (kLoansFeatureEnabled && summary.loansGiven > 0) ||
+      (kLoansFeatureEnabled && summary.loansTaken > 0) ||
+      (kLoansFeatureEnabled && summary.loanRepaymentPaid > 0) ||
+      (kLoansFeatureEnabled && summary.loanRepaymentReceived > 0) ||
       summary.billPaymentCount > 0 ||
       summary.billUnpaidCount > 0 ||
       summary.billUpcomingCount > 0 ||
       summary.billOverdueCount > 0 ||
-      summary.loanReminderCompletedCount > 0 ||
-      summary.loanReminderPendingCount > 0 ||
-      summary.loanReminderPartialCount > 0 ||
-      summary.loanReminderOverdueCount > 0 ||
+      (kLoansFeatureEnabled && summary.loanReminderCompletedCount > 0) ||
+      (kLoansFeatureEnabled && summary.loanReminderPendingCount > 0) ||
+      (kLoansFeatureEnabled && summary.loanReminderPartialCount > 0) ||
+      (kLoansFeatureEnabled && summary.loanReminderOverdueCount > 0) ||
       summary.budgetItems.isNotEmpty;
 }
 
@@ -4393,7 +4767,7 @@ class KoinlyAppIcon extends StatelessWidget {
         child: Image.asset(
           'assets/icons/app_icon.png',
           fit: BoxFit.cover,
-          filterQuality: FilterQuality.high,
+          filterQuality: FilterQuality.medium,
           errorBuilder: (context, error, stackTrace) => DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(radius),
@@ -4451,10 +4825,7 @@ class LockScreen extends StatelessWidget {
                   Text('Verify your identity to continue', textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyLarge),
                   const SizedBox(height: 24),
                   FilledButton.icon(
-                    onPressed: () async {
-                      state.authenticated = await state.authenticate();
-                      state.notifyListeners();
-                    },
+                    onPressed: state.unlockApp,
                     icon: const Icon(Icons.fingerprint_rounded),
                     label: const Text('Unlock'),
                   ),
@@ -4468,28 +4839,74 @@ class LockScreen extends StatelessWidget {
   }
 }
 
-class MainShell extends StatelessWidget {
+class MainShell extends StatefulWidget {
   const MainShell({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
-    final pages = const [
-      HomeDashboardScreen(),
-      AnalysisScreen(),
-      LoansScreen(),
-      TransactionListScreen(),
-      CategoriesScreen(),
-    ];
+  State<MainShell> createState() => _MainShellState();
+}
 
-    final Widget? actionButton = state.tabIndex == 2
+class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
+  bool _startupUpdateCheckScheduled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _runStartupUpdateCheck());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(context.read<AppController>().resumePendingAndroidInstallIfAllowed());
+    }
+  }
+
+  Future<void> _runStartupUpdateCheck() async {
+    if (_startupUpdateCheckScheduled || !mounted) return;
+    _startupUpdateCheckScheduled = true;
+    final state = context.read<AppController>();
+    final result = await state.checkForUpdates();
+    if (!mounted || !result.hasUpdate || result.release == null) return;
+    if (!state.canShowStartupUpdateDialog(result.release!)) return;
+    state.markStartupUpdateDialogShown(result.release!);
+    await showUpdateBottomSheet(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final requestedTabIndex = context.select<AppController, int>((state) => state.tabIndex);
+    final activeLoanType = context.select<AppController, LoanType>((state) => state.activeLoanType);
+    final state = context.read<AppController>();
+    final pages = <Widget>[
+      const HomeDashboardScreen(),
+      const AnalysisScreen(),
+      if (kLoansFeatureEnabled) const LoansScreen(),
+      const TransactionListScreen(),
+      const CategoriesScreen(),
+    ];
+    final tabIndex = requestedTabIndex.clamp(0, pages.length - 1).toInt();
+    if (requestedTabIndex != tabIndex) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) state.selectTabIndex(tabIndex);
+      });
+    }
+
+    final Widget? actionButton = kLoansFeatureEnabled && tabIndex == kLoansTabIndex
         ? FloatingActionButton.extended(
             heroTag: 'loanAddFab',
-            onPressed: () => showLoanEditor(context, initialType: state.activeLoanType),
+            onPressed: () => showLoanEditor(context, initialType: activeLoanType),
             icon: const Icon(Icons.add_rounded),
             label: const Text('Add loan'),
           )
-        : state.tabIndex == 3
+        : tabIndex == kTransactionTabIndex
             ? FloatingActionButton.extended(
                 heroTag: 'transactionAddFab',
                 onPressed: () => showTransactionEditor(context),
@@ -4504,8 +4921,7 @@ class MainShell extends StatelessWidget {
         final extendDesktopNavigation = constraints.maxWidth >= 1180;
 
         void selectTab(int index) {
-          state.tabIndex = index;
-          state.notifyListeners();
+          state.selectTabIndex(index);
         }
 
         return Scaffold(
@@ -4514,7 +4930,7 @@ class MainShell extends StatelessWidget {
             children: [
               if (useDesktopNavigation)
                 _SideRailNavigation(
-                  selectedIndex: state.tabIndex,
+                  selectedIndex: tabIndex,
                   extended: extendDesktopNavigation,
                   onSelected: selectTab,
                 ),
@@ -4536,7 +4952,7 @@ class MainShell extends StatelessWidget {
                             ),
                           );
                         },
-                        child: KeyedSubtree(key: ValueKey<int>(state.tabIndex), child: pages[state.tabIndex]),
+                        child: KeyedSubtree(key: ValueKey<int>(tabIndex), child: pages[tabIndex]),
                       ),
                     ),
                     if (actionButton != null)
@@ -4551,7 +4967,7 @@ class MainShell extends StatelessWidget {
                         right: 0,
                         bottom: 0,
                         child: _FloatingDockNavigation(
-                          selectedIndex: state.tabIndex,
+                          selectedIndex: tabIndex,
                           onSelected: selectTab,
                         ),
                       ),
@@ -4661,7 +5077,7 @@ class _SideRailNavigation extends StatelessWidget {
                   selectedLabelTextStyle: const TextStyle(color: kSleekAccent, fontWeight: FontWeight.w900, fontSize: 12),
                   unselectedLabelTextStyle: TextStyle(color: scheme.onSurfaceVariant.withOpacity(.82), fontWeight: FontWeight.w800, fontSize: 11),
                   onDestinationSelected: onSelected,
-                  destinations: _FloatingDockNavigation._destinations
+                  destinations: _FloatingDockNavigation.destinations
                       .map(
                         (destination) => NavigationRailDestination(
                           icon: Icon(destination.icon),
@@ -4689,12 +5105,12 @@ class _FloatingDockNavigation extends StatelessWidget {
   final int selectedIndex;
   final ValueChanged<int> onSelected;
 
-  static const _destinations = [
-    _DockDestination(label: 'Home', icon: Icons.home_outlined, activeIcon: Icons.home_rounded),
-    _DockDestination(label: 'Analysis', icon: Icons.insights_outlined, activeIcon: Icons.insights_rounded),
-    _DockDestination(label: 'Loans', icon: Icons.handshake_outlined, activeIcon: Icons.handshake_rounded),
-    _DockDestination(label: 'Transaction', icon: Icons.receipt_long_outlined, activeIcon: Icons.receipt_long_rounded),
-    _DockDestination(label: 'Categories', icon: Icons.category_outlined, activeIcon: Icons.category_rounded),
+  static List<_DockDestination> get destinations => [
+    const _DockDestination(label: 'Home', icon: Icons.home_outlined, activeIcon: Icons.home_rounded),
+    const _DockDestination(label: 'Analysis', icon: Icons.insights_outlined, activeIcon: Icons.insights_rounded),
+    if (kLoansFeatureEnabled) const _DockDestination(label: 'Loans', icon: Icons.handshake_outlined, activeIcon: Icons.handshake_rounded),
+    const _DockDestination(label: 'Transaction', icon: Icons.receipt_long_outlined, activeIcon: Icons.receipt_long_rounded),
+    const _DockDestination(label: 'Categories', icon: Icons.category_outlined, activeIcon: Icons.category_rounded),
   ];
 
   @override
@@ -4703,8 +5119,8 @@ class _FloatingDockNavigation extends StatelessWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final active = kSleekAccent;
     final inactive = dark ? scheme.onSurface.withOpacity(.72) : scheme.onSurfaceVariant.withOpacity(.78);
-    final dockColor = dark ? const Color(0xFF1B2024).withOpacity(.96) : Colors.white.withOpacity(.94);
-    final selectedColor = dark ? kSleekAccent.withOpacity(.26) : kSleekAccent.withOpacity(.18);
+    final dockColor = dark ? const Color(0xF20A161C) : Colors.white.withOpacity(.94);
+    final selectedColor = dark ? kSleekAccent.withOpacity(.32) : kSleekAccent.withOpacity(.18);
 
     return SafeArea(
       top: false,
@@ -4714,20 +5130,30 @@ class _FloatingDockNavigation extends StatelessWidget {
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 450),
           child: Container(
-            height: 76,
+            height: 78,
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
             decoration: BoxDecoration(
               color: dockColor,
+              gradient: dark
+                  ? LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        const Color(0xFF0D2128).withOpacity(.94),
+                        const Color(0xFF071217).withOpacity(.96),
+                      ],
+                    )
+                  : null,
               borderRadius: BorderRadius.circular(30),
-              border: Border.all(color: dark ? Colors.white.withOpacity(.055) : scheme.outline.withOpacity(.16), width: 1),
+              border: Border.all(color: dark ? Colors.white.withOpacity(.095) : scheme.outline.withOpacity(.16), width: 1),
               boxShadow: [
-                BoxShadow(color: Colors.black.withOpacity(dark ? .34 : .12), blurRadius: 24, offset: const Offset(0, 10)),
-                BoxShadow(color: kSleekAccent.withOpacity(dark ? .08 : .05), blurRadius: 22, offset: const Offset(0, -2)),
+                BoxShadow(color: Colors.black.withOpacity(dark ? .42 : .12), blurRadius: 28, offset: const Offset(0, 14)),
+                BoxShadow(color: kSleekAccent.withOpacity(dark ? .12 : .05), blurRadius: 28, offset: const Offset(0, -3)),
               ],
             ),
             child: Row(
-              children: List.generate(_destinations.length, (index) {
-                final destination = _destinations[index];
+              children: List.generate(destinations.length, (index) {
+                final destination = destinations[index];
                 final selected = selectedIndex == index;
                 return Expanded(
                   child: Tooltip(
@@ -4747,10 +5173,10 @@ class _FloatingDockNavigation extends StatelessWidget {
                             height: selected ? 58 : 48,
                             decoration: BoxDecoration(
                               color: selected ? selectedColor : Colors.transparent,
-                              borderRadius: BorderRadius.circular(selected ? 22 : 18),
-                              border: selected ? Border.all(color: kSleekAccent.withOpacity(.18), width: 1) : null,
+                              borderRadius: BorderRadius.circular(selected ? 21 : 18),
+                              border: selected ? Border.all(color: kSleekAccent.withOpacity(.32), width: 1) : null,
                               boxShadow: selected
-                                  ? [BoxShadow(color: kSleekAccent.withOpacity(.14), blurRadius: 16, offset: const Offset(0, 8))]
+                                  ? [BoxShadow(color: kSleekAccent.withOpacity(.20), blurRadius: 18, offset: const Offset(0, 8))]
                                   : null,
                             ),
                             child: Icon(
@@ -4810,7 +5236,86 @@ class PageScaffold extends StatelessWidget {
                 ))
             .toList(),
       ),
-      body: SafeArea(top: false, child: child),
+      body: KoinlyAtmosphere(child: SafeArea(top: false, child: child)),
+    );
+  }
+}
+
+class KoinlyAtmosphere extends StatelessWidget {
+  const KoinlyAtmosphere({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    if (!dark) {
+      return DecoratedBox(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFFF8FDFF), Color(0xFFEFF8FB), Color(0xFFFFFFFF)],
+          ),
+        ),
+        child: child,
+      );
+    }
+
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        color: kSleekBackground,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF021116), Color(0xFF020B0F), Color(0xFF041015)],
+        ),
+      ),
+      child: Stack(
+        children: [
+          Positioned(
+            top: -150,
+            left: -110,
+            child: IgnorePointer(
+              child: Container(
+                width: 380,
+                height: 380,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      kSleekAccent.withOpacity(.16),
+                      kSleekAccent.withOpacity(.055),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            right: -170,
+            top: 90,
+            child: IgnorePointer(
+              child: Container(
+                width: 360,
+                height: 360,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(
+                    colors: [
+                      const Color(0xFF226DFF).withOpacity(.11),
+                      const Color(0xFF00D7E8).withOpacity(.035),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(child: child),
+        ],
+      ),
     );
   }
 }
@@ -4959,20 +5464,20 @@ class ExpressiveCard extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final dark = Theme.of(context).brightness == Brightness.dark;
     final baseColor = color ?? (dark ? scheme.surfaceContainer : Colors.white);
-    final borderColor = dark ? Colors.white.withOpacity(.065) : scheme.outlineVariant.withOpacity(.74);
+    final borderColor = dark ? Colors.white.withOpacity(.085) : scheme.outlineVariant.withOpacity(.74);
     return AnimatedContainer(
       duration: AppMotion.medium,
       curve: AppMotion.emphasized,
       decoration: BoxDecoration(
-        color: baseColor,
+        color: baseColor.withOpacity(dark ? .88 : 1),
         gradient: surfaceTint
             ? LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: [
-                  Color.alphaBlend(kSleekAccent.withOpacity(dark ? .025 : .030), baseColor),
-                  baseColor,
-                  Color.alphaBlend(scheme.tertiary.withOpacity(dark ? .018 : .022), baseColor),
+                  Color.alphaBlend(kSleekAccent.withOpacity(dark ? .075 : .030), baseColor),
+                  baseColor.withOpacity(dark ? .92 : 1),
+                  Color.alphaBlend(scheme.tertiary.withOpacity(dark ? .035 : .022), baseColor),
                 ],
               )
             : null,
@@ -4980,13 +5485,15 @@ class ExpressiveCard extends StatelessWidget {
         border: Border.all(color: borderColor, width: 1),
         boxShadow: kIsDesktopApp
             ? [
-                BoxShadow(color: Colors.black.withOpacity(dark ? .10 : .025), blurRadius: 18, offset: const Offset(0, 8)),
+                BoxShadow(color: Colors.black.withOpacity(dark ? .20 : .025), blurRadius: 24, offset: const Offset(0, 12)),
+                if (dark) BoxShadow(color: kSleekAccent.withOpacity(.045), blurRadius: 28, offset: const Offset(0, 2)),
               ]
             : [
                 if (dark)
-                  BoxShadow(color: Colors.black.withOpacity(.20), blurRadius: 18, offset: const Offset(0, 9))
+                  BoxShadow(color: Colors.black.withOpacity(.32), blurRadius: 22, offset: const Offset(0, 12))
                 else
                   BoxShadow(color: scheme.shadow.withOpacity(.060), blurRadius: 18, offset: const Offset(0, 9)),
+                if (dark) BoxShadow(color: kSleekAccent.withOpacity(.06), blurRadius: 26, offset: const Offset(0, 4)),
               ],
       ),
       child: ClipRRect(
@@ -5039,7 +5546,6 @@ class SleekPillSelector<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     return Row(
       children: [
         for (var i = 0; i < options.length; i++) ...[
@@ -5305,6 +5811,7 @@ IconData iconFor(String name) {
     case 'loan_paid': return Icons.north_east_rounded;
     case 'warning': return Icons.warning_amber_rounded;
     case 'reminder': return Icons.notifications_active_rounded;
+    case 'download': return Icons.system_update_alt_rounded;
     default: return Icons.category_rounded;
   }
 }
@@ -5342,7 +5849,7 @@ Widget iconGlyph(
         width: size,
         height: size,
         fit: BoxFit.contain,
-        filterQuality: FilterQuality.high,
+        filterQuality: FilterQuality.medium,
       ),
     );
   }
@@ -5351,14 +5858,23 @@ Widget iconGlyph(
 
 Widget iconBubble(BuildContext context, String icon, String color, {double size = 44}) {
   final c = colorFromHex(color, fallback: Theme.of(context).colorScheme.primary);
+  final dark = Theme.of(context).brightness == Brightness.dark;
   return Container(
     width: size,
     height: size,
     decoration: BoxDecoration(
-      color: c.withOpacity(.16),
+      color: c.withOpacity(dark ? .20 : .16),
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          c.withOpacity(dark ? .26 : .18),
+          c.withOpacity(dark ? .10 : .08),
+        ],
+      ),
       borderRadius: BorderRadius.circular(size * .32),
-      border: Border.all(color: c.withOpacity(.25), width: 1),
-      boxShadow: kIsDesktopApp ? null : [BoxShadow(color: c.withOpacity(.10), blurRadius: 10, offset: const Offset(0, 4))],
+      border: Border.all(color: c.withOpacity(dark ? .34 : .25), width: 1),
+      boxShadow: kIsDesktopApp ? null : [BoxShadow(color: c.withOpacity(.15), blurRadius: 14, offset: const Offset(0, 6))],
     ),
     child: Center(
       child: iconGlyph(
@@ -6035,7 +6551,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       _OnboardingPane(
                         icon: Icons.account_balance_wallet_rounded,
                         title: 'Track money without losing detail',
-                        body: 'Accounts, categories, transactions, budgets, loans, analysis, exports, reminders, and local backup are available from the first setup.',
+                        body: 'Accounts, categories, transactions, budgets, analysis, exports, reminders, and local backup are available from the first setup.',
                         actions: Wrap(
                           alignment: WrapAlignment.center,
                           spacing: 12,
@@ -6205,7 +6721,7 @@ class CurrencySetupPane extends StatelessWidget {
           const SizedBox(height: 24),
           Text('Currency setup', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
           const SizedBox(height: 12),
-          const Text('Choose how every amount is formatted across accounts, loans, budgets, analysis, and exports.', textAlign: TextAlign.center),
+          const Text('Choose how every amount is formatted across accounts, budgets, analysis, and exports.', textAlign: TextAlign.center),
           const SizedBox(height: 24),
           CurrencyForm(initialSymbol: state.currencySymbol, initialCode: state.currencyCode, initialPosition: state.currencyPosition, initialSeparators: state.useSeparators),
         ],
@@ -6272,14 +6788,19 @@ class HomeDashboardScreen extends StatelessWidget {
     final txs = state.filteredTransactions();
     final summary = state.summaryFor(txs);
     final accountBalance = state.totalAccountBalance;
-    final categoryTotals = state.categoryTotals(CategoryType.expense);
+    final categoryTotals = state.categoryTotals(CategoryType.expense, source: txs);
     final topCategories = categoryTotals.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final categoryGrandTotal = categoryTotals.values.fold<double>(0, (sum, value) => sum + value);
+
+    void selectTab(int index) {
+      state.selectTabIndex(index);
+    }
 
     final balanceCard = BalanceHeroCard(
       balance: state.format(accountBalance),
       income: state.format(summary.income),
       expense: state.format(summary.expense),
-      subtitle: '${state.accounts.length} accounts total • ${state.activeRange().label} balance ${state.format(summary.balance)}',
+      subtitle: '${state.accounts.length} accounts total • ${range.label} balance ${state.format(summary.balance)}',
       amountsHidden: state.amountsHidden,
       onToggleAmounts: state.toggleAmountsHidden,
     );
@@ -6315,7 +6836,7 @@ class HomeDashboardScreen extends StatelessWidget {
 
 
     final overdueLoanSection = <Widget>[
-      if (state.overdueLoanReminders.isNotEmpty) ...[
+      if (kLoansFeatureEnabled && state.overdueLoanReminders.isNotEmpty) ...[
         const SectionHeader('Loan alerts'),
         GestureDetector(
           behavior: HitTestBehavior.opaque,
@@ -6323,10 +6844,10 @@ class HomeDashboardScreen extends StatelessWidget {
             final reminder = state.overdueLoanReminders.firstOrNull;
             final loan = reminder == null ? null : state.loanOf(reminder.loanId);
             if (loan != null) {
-              state.activeLoanType = loan.type;
+              state.selectLoanTab(loan.type);
+            } else {
+              state.selectTabIndex(kLoansTabIndex);
             }
-            state.tabIndex = 2;
-            state.notifyListeners();
           },
           child: ExpressiveCard(
             color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF2A1719) : const Color(0xFFFFF0F0),
@@ -6352,6 +6873,44 @@ class HomeDashboardScreen extends StatelessWidget {
       ],
     ];
 
+    final quickActionsSection = <Widget>[
+      const SectionHeader('Quick actions'),
+      GridView.count(
+        crossAxisCount: AppBreakpoints.isSmall(context) ? 4 : 4,
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        mainAxisSpacing: 10,
+        crossAxisSpacing: 10,
+        childAspectRatio: AppBreakpoints.isSmall(context) ? .88 : 1.05,
+        children: [
+          QuickActionTile(
+            iconName: 'wallet',
+            iconColor: '#78D8E8',
+            label: 'Accounts',
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AccountListScreen())),
+          ),
+          QuickActionTile(
+            iconName: 'salary',
+            iconColor: '#2BD9A1',
+            label: 'Add\ntransaction',
+            onTap: () => showTransactionEditor(context),
+          ),
+          QuickActionTile(
+            iconName: 'store',
+            iconColor: '#F6B44B',
+            label: 'Categories',
+            onTap: () => selectTab(kCategoriesTabIndex),
+          ),
+          QuickActionTile(
+            iconName: 'investment',
+            iconColor: '#8B5CF6',
+            label: 'Analysis',
+            onTap: () => selectTab(1),
+          ),
+        ],
+      ),
+    ];
+
     final categorySection = <Widget>[
       SectionHeader('Category spending'),
       if (topCategories.isEmpty)
@@ -6361,12 +6920,11 @@ class HomeDashboardScreen extends StatelessWidget {
           child: Column(
             children: topCategories.take(4).map((entry) {
               final category = state.categoryOf(entry.key);
-              final total = categoryTotals.values.fold<double>(0, (s, v) => s + v);
               return ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: category == null ? null : iconBubble(context, category.iconName, category.iconColor),
                 title: Text(category?.name ?? 'Unknown'),
-                subtitle: LinearProgressIndicator(value: total <= 0 ? 0 : entry.value / total),
+                subtitle: LinearProgressIndicator(value: categoryGrandTotal <= 0 ? 0 : entry.value / categoryGrandTotal),
                 trailing: Text(state.format(entry.value), style: const TextStyle(fontWeight: FontWeight.w800)),
                 onTap: category == null ? null : () => Navigator.push(context, MaterialPageRoute(builder: (_) => CategoryTransactionScreen(category: category))),
               );
@@ -6393,6 +6951,7 @@ class HomeDashboardScreen extends StatelessWidget {
                 children: [
                   balanceCard,
                   ...overdueLoanSection,
+                  ...quickActionsSection,
                   ...accountsSection,
                   ...budgetSection,
                   ...categorySection,
@@ -6410,6 +6969,7 @@ class HomeDashboardScreen extends StatelessWidget {
                     children: [
                       balanceCard,
                       ...overdueLoanSection,
+                      ...quickActionsSection,
                       ...accountsSection,
                       ...budgetSection,
                     ],
@@ -6481,6 +7041,77 @@ class HomeNavigationTile extends StatelessWidget {
   }
 }
 
+class QuickActionTile extends StatelessWidget {
+  const QuickActionTile({
+    super.key,
+    required this.iconName,
+    required this.iconColor,
+    required this.label,
+    required this.onTap,
+  });
+
+  final String iconName;
+  final String iconColor;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final accent = colorFromHex(iconColor, fallback: kSleekAccent);
+    return Semantics(
+      button: true,
+      label: label.replaceAll('\n', ' '),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(22),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: AppMotion.fast,
+          curve: AppMotion.spring,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+          decoration: BoxDecoration(
+            color: dark ? const Color(0xFF0B1B21).withOpacity(.78) : Colors.white.withOpacity(.94),
+            gradient: dark
+                ? LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Color.alphaBlend(accent.withOpacity(.09), const Color(0xFF0B1B21)),
+                      const Color(0xFF09151A),
+                    ],
+                  )
+                : null,
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: dark ? Colors.white.withOpacity(.07) : scheme.outlineVariant.withOpacity(.72)),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withOpacity(dark ? .20 : .06), blurRadius: 16, offset: const Offset(0, 8)),
+            ],
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              iconBubble(context, iconName, iconColor, size: 42),
+              const SizedBox(height: 8),
+              Text(
+                label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: dark ? const Color(0xFFDDE9EC) : scheme.onSurface,
+                      fontWeight: FontWeight.w900,
+                      height: 1.05,
+                    ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class MiniMetric extends StatelessWidget {
   const MiniMetric(this.label, this.value, this.icon, {super.key});
   final String label;
@@ -6520,12 +7151,13 @@ class MiniMetric extends StatelessWidget {
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 230;
         return Container(
-          constraints: BoxConstraints(minHeight: compact ? 86 : 68),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+          constraints: BoxConstraints(minHeight: compact ? 82 : 66),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: colorScheme.surfaceContainerHighest.withOpacity(.48),
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: colorScheme.outline.withOpacity(.28), width: .8),
+            color: colorScheme.surfaceContainerHighest.withOpacity(Theme.of(context).brightness == Brightness.dark ? .42 : .48),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: colorScheme.outline.withOpacity(.24), width: .8),
+            boxShadow: Theme.of(context).brightness == Brightness.dark ? [BoxShadow(color: Colors.black.withOpacity(.12), blurRadius: 14, offset: const Offset(0, 8))] : null,
           ),
           child: compact
               ? Row(
@@ -6598,15 +7230,15 @@ class BalanceHeroCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(28),
         gradient: dark
             ? LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: [
-                  const Color(0xFF0A3137),
-                  const Color(0xFF0D2025),
-                  scheme.surface,
+                  const Color(0xFF083E47),
+                  const Color(0xFF08242B),
+                  const Color(0xFF07171D),
                 ],
               )
             : LinearGradient(
@@ -6618,12 +7250,15 @@ class BalanceHeroCard extends StatelessWidget {
                   scheme.surface,
                 ],
               ),
-        border: Border.all(color: dark ? kSleekAccent.withOpacity(.18) : scheme.outline.withOpacity(.16), width: 1),
+        border: Border.all(color: dark ? kSleekAccent.withOpacity(.28) : scheme.outline.withOpacity(.16), width: 1),
         boxShadow: kIsDesktopApp
-            ? null
+            ? [
+                BoxShadow(color: Colors.black.withOpacity(dark ? .24 : .055), blurRadius: 28, offset: const Offset(0, 14)),
+                if (dark) BoxShadow(color: kSleekAccent.withOpacity(.10), blurRadius: 36, offset: const Offset(0, 5)),
+              ]
             : [
-                BoxShadow(color: kSleekAccent.withOpacity(dark ? .08 : .05), blurRadius: 18, offset: const Offset(0, 9)),
-                BoxShadow(color: Colors.black.withOpacity(dark ? .22 : .055), blurRadius: 16, offset: const Offset(0, 8)),
+                BoxShadow(color: kSleekAccent.withOpacity(dark ? .13 : .05), blurRadius: 24, offset: const Offset(0, 9)),
+                BoxShadow(color: Colors.black.withOpacity(dark ? .32 : .055), blurRadius: 20, offset: const Offset(0, 10)),
               ],
       ),
       child: Column(
@@ -6659,9 +7294,22 @@ class BalanceHeroCard extends StatelessWidget {
               child: Text(balance, maxLines: 1, softWrap: false, style: Theme.of(context).textTheme.displaySmall?.copyWith(fontWeight: FontWeight.w900, letterSpacing: -1.2, color: valueColor)),
             ),
           ),
-          const SizedBox(height: 7),
-          Text(subtitle, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: subtitleColor, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 18),
+          const SizedBox(height: 8),
+          Text(subtitle, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: subtitleColor, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: kSleekIncome.withOpacity(dark ? .13 : .10),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: kSleekIncome.withOpacity(.18)),
+            ),
+            child: Text(
+              'Local-first overview',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(color: kSleekIncome, fontWeight: FontWeight.w900),
+            ),
+          ),
+          const SizedBox(height: 16),
           const _DecorativeSparkline(),
           const SizedBox(height: 18),
           Row(
@@ -6769,9 +7417,11 @@ class AccountTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
+    final state = context.read<AppController>();
+    final balanceColor = account.amount < 0 ? kSleekExpense : Theme.of(context).colorScheme.onSurface;
     return ExpressiveCard(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      radius: 24,
       child: ListTile(
         contentPadding: EdgeInsets.zero,
         leading: iconBubble(context, account.iconName, account.iconColor, size: 46),
@@ -6789,7 +7439,7 @@ class AccountTile extends StatelessWidget {
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(state.format(account.amount), style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+            Text(state.format(account.amount), style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900, color: balanceColor)),
             const SizedBox(width: 6),
             Icon(Icons.chevron_right_rounded, color: Theme.of(context).colorScheme.onSurfaceVariant),
           ],
@@ -6999,7 +7649,7 @@ class _SavingsSuggestionPanelState extends State<SavingsSuggestionPanel> with Si
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
+    final state = context.read<AppController>();
     final unseenSuggestions = state.unseenSavingsPurchaseSuggestionsForToday();
     if (unseenSuggestions.isEmpty) return const SizedBox.shrink();
 
@@ -7518,9 +8168,9 @@ class IconColorPicker extends StatelessWidget {
     'sports', 'fitness', 'book', 'school', 'car', 'bus', 'train', 'flight', 'origami_bird', 'anime', 'manga', 'collectibles', 'headphones', 'keyboard', 'laptop', 'monitor', 'mic', 'video', 'art', 'subscription', 'fuel',
     'home', 'house', 'apartment', 'utilities', 'water', 'wifi', 'phone', 'bolt',
     'gift', 'celebration', 'travel', 'pets', 'baby', 'beauty', 'salary', 'work',
-    'business', 'investment', 'money', 'exchange', 'coupon', 'handshake', 'donation',
+    'business', 'investment', 'money', 'exchange', 'coupon', 'donation',
     'security', 'insurance', 'tools', 'construction', 'cleaning', 'laundry', 'parking',
-    'calendar', 'time', 'flag', 'profile', 'loan_given', 'loan_taken'
+    'calendar', 'time', 'flag', 'profile'
   ];
   static const colors = [
     '#78D8E8', '#38BDF8', '#0EA5E9', '#2563EB', '#1D4ED8', '#6366F1', '#8B5CF6', '#A855F7',
@@ -8470,7 +9120,8 @@ class CategoryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ExpressiveCard(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      radius: 24,
       child: ListTile(
         contentPadding: EdgeInsets.zero,
         leading: iconBubble(context, category.iconName, category.iconColor),
@@ -8620,7 +9271,7 @@ class TransactionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
+    final state = context.read<AppController>();
     final category = state.categoryOf(tx.categoryId);
     final account = state.accountOf(tx.fromAccountId);
     final toAccount = tx.toAccountId == null ? null : state.accountOf(tx.toAccountId!);
@@ -8632,7 +9283,8 @@ class TransactionTile extends StatelessWidget {
             ? category?.name ?? 'Unknown'
             : tx.displayType;
     return ExpressiveCard(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      radius: 24,
       child: ListTile(
         contentPadding: EdgeInsets.zero,
         leading: tx.type == MoneyTransactionType.transfer
@@ -9128,9 +9780,12 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
       chartStart = range.start!;
       chartEnd = range.end!;
     } else if (txs.isNotEmpty) {
-      final sortedDates = txs.map((tx) => tx.createdOn).toList()..sort();
-      final first = sortedDates.first;
-      final last = sortedDates.last;
+      var first = txs.first.createdOn;
+      var last = txs.first.createdOn;
+      for (final tx in txs.skip(1)) {
+        if (tx.createdOn.isBefore(first)) first = tx.createdOn;
+        if (tx.createdOn.isAfter(last)) last = tx.createdOn;
+      }
       chartStart = DateTime(first.year, first.month, first.day);
       chartEnd = DateTime(last.year, last.month, last.day).add(const Duration(days: 1));
     } else {
@@ -9732,10 +10387,12 @@ class FinancialHealthSummarySection extends StatelessWidget {
           HealthMetricData('Savings out', state.format(summary.savingsOut), Icons.output_rounded),
           HealthMetricData('Savings change', state.format(summary.savingsNet), Icons.trending_up_rounded),
           HealthMetricData('Current savings', state.format(summary.currentSavingsBalance), Icons.account_balance_rounded),
-          HealthMetricData('Loans given', state.format(summary.loansGiven), Icons.north_east_rounded),
-          HealthMetricData('Loans taken', state.format(summary.loansTaken), Icons.south_west_rounded),
-          HealthMetricData('Repayment paid', state.format(summary.loanRepaymentPaid), Icons.payments_rounded),
-          HealthMetricData('Repayment received', state.format(summary.loanRepaymentReceived), Icons.call_received_rounded),
+          if (kLoansFeatureEnabled) ...[
+            HealthMetricData('Loans given', state.format(summary.loansGiven), Icons.north_east_rounded),
+            HealthMetricData('Loans taken', state.format(summary.loansTaken), Icons.south_west_rounded),
+            HealthMetricData('Repayment paid', state.format(summary.loanRepaymentPaid), Icons.payments_rounded),
+            HealthMetricData('Repayment received', state.format(summary.loanRepaymentReceived), Icons.call_received_rounded),
+          ],
           HealthMetricData('Recurring paid', state.format(summary.billPaymentTotal), Icons.receipt_long_rounded),
           HealthMetricData('Budget remaining', state.format(summary.budgetRemaining), Icons.pie_chart_rounded),
           HealthMetricData('Overspent', state.format(summary.overspentTotal), Icons.warning_rounded),
@@ -9745,7 +10402,7 @@ class FinancialHealthSummarySection extends StatelessWidget {
         const SizedBox(height: 10),
         BudgetHealthCard(summary: summary),
         const SizedBox(height: 10),
-        LoanAndBillStatusCard(summary: summary),
+        BillStatusCard(summary: summary),
         if (summary.overspentItems.isNotEmpty) ...[
           const SizedBox(height: 10),
           OverspendingCategoriesCard(summary: summary),
@@ -9897,19 +10554,20 @@ class FinancialHealthCharts extends StatelessWidget {
                 ],
               ),
             ),
-            SizedBox(
-              width: width,
-              child: HealthBarChartCard(
-                title: 'Loan Activity',
-                icon: Icons.account_balance_rounded,
-                bars: [
-                  HealthBarData('Given', summary.loansGiven, state.format(summary.loansGiven), const Color(0xFFFF9AA2)),
-                  HealthBarData('Taken', summary.loansTaken, state.format(summary.loansTaken), const Color(0xFF8AB4FF)),
-                  HealthBarData('Paid', summary.loanRepaymentPaid, state.format(summary.loanRepaymentPaid), kSleekExpense),
-                  HealthBarData('Received', summary.loanRepaymentReceived, state.format(summary.loanRepaymentReceived), kSleekIncome),
-                ],
+            if (kLoansFeatureEnabled)
+              SizedBox(
+                width: width,
+                child: HealthBarChartCard(
+                  title: 'Loan Activity',
+                  icon: Icons.account_balance_rounded,
+                  bars: [
+                    HealthBarData('Given', summary.loansGiven, state.format(summary.loansGiven), const Color(0xFFFF9AA2)),
+                    HealthBarData('Taken', summary.loansTaken, state.format(summary.loansTaken), const Color(0xFF8AB4FF)),
+                    HealthBarData('Paid', summary.loanRepaymentPaid, state.format(summary.loanRepaymentPaid), kSleekExpense),
+                    HealthBarData('Received', summary.loanRepaymentReceived, state.format(summary.loanRepaymentReceived), kSleekIncome),
+                  ],
+                ),
               ),
-            ),
             SizedBox(
               width: width,
               child: HealthBarChartCard(
@@ -9929,8 +10587,10 @@ class FinancialHealthCharts extends StatelessWidget {
                 icon: Icons.repeat_rounded,
                 bars: [
                   HealthBarData('Paid bills', summary.billPaymentTotal, state.format(summary.billPaymentTotal), kSleekAccent),
-                  HealthBarData('Loan reminders', (summary.loanReminderPendingCount + summary.loanReminderOverdueCount).toDouble(), '${summary.loanReminderPendingCount + summary.loanReminderOverdueCount}', kSleekWarning),
-                  HealthBarData('Overdue alerts', summary.loanReminderOverdueCount.toDouble(), '${summary.loanReminderOverdueCount}', kSleekExpense),
+                  if (kLoansFeatureEnabled) ...[
+                    HealthBarData('Loan reminders', (summary.loanReminderPendingCount + summary.loanReminderOverdueCount).toDouble(), '${summary.loanReminderPendingCount + summary.loanReminderOverdueCount}', kSleekWarning),
+                    HealthBarData('Overdue alerts', summary.loanReminderOverdueCount.toDouble(), '${summary.loanReminderOverdueCount}', kSleekExpense),
+                  ],
                 ],
               ),
             ),
@@ -10058,8 +10718,8 @@ class BudgetHealthCard extends StatelessWidget {
   }
 }
 
-class LoanAndBillStatusCard extends StatelessWidget {
-  const LoanAndBillStatusCard({super.key, required this.summary});
+class BillStatusCard extends StatelessWidget {
+  const BillStatusCard({super.key, required this.summary});
 
   final FinancialHealthSummary summary;
 
@@ -10080,10 +10740,12 @@ class LoanAndBillStatusCard extends StatelessWidget {
               HealthStatusPill(label: 'Bills unpaid ${summary.billUnpaidCount}', color: kSleekWarning),
               HealthStatusPill(label: 'Bills upcoming ${summary.billUpcomingCount}', color: const Color(0xFF8AB4FF)),
               HealthStatusPill(label: 'Bills overdue ${summary.billOverdueCount}', color: kSleekExpense),
-              HealthStatusPill(label: 'Loan completed ${summary.loanReminderCompletedCount}', color: kSleekIncome),
-              HealthStatusPill(label: 'Loan pending ${summary.loanReminderPendingCount}', color: kSleekWarning),
-              HealthStatusPill(label: 'Loan partial ${summary.loanReminderPartialCount}', color: kSleekAccent),
-              HealthStatusPill(label: 'Loan overdue ${summary.loanReminderOverdueCount}', color: kSleekExpense),
+              if (kLoansFeatureEnabled) ...[
+                HealthStatusPill(label: 'Loan completed ${summary.loanReminderCompletedCount}', color: kSleekIncome),
+                HealthStatusPill(label: 'Loan pending ${summary.loanReminderPendingCount}', color: kSleekWarning),
+                HealthStatusPill(label: 'Loan partial ${summary.loanReminderPartialCount}', color: kSleekAccent),
+                HealthStatusPill(label: 'Loan overdue ${summary.loanReminderOverdueCount}', color: kSleekExpense),
+              ],
             ],
           ),
         ],
@@ -10251,7 +10913,14 @@ class MonthBreakdownTile extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 6),
-          Text('Savings ${state.format(item.savingsNet)} • Loans ${state.format(item.loansGiven + item.loansTaken)} • Repayments ${state.format(item.loanRepaymentPaid + item.loanRepaymentReceived)} • Bills ${item.billPaymentCount} • Budget used ${state.format(item.budgetSpent)}', maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700)),
+          Text(
+            kLoansFeatureEnabled
+                ? 'Savings ${state.format(item.savingsNet)} • Loans ${state.format(item.loansGiven + item.loansTaken)} • Repayments ${state.format(item.loanRepaymentPaid + item.loanRepaymentReceived)} • Bills ${item.billPaymentCount} • Budget used ${state.format(item.budgetSpent)}'
+                : 'Savings ${state.format(item.savingsNet)} • Bills ${item.billPaymentCount} • Budget used ${state.format(item.budgetSpent)}',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
+          ),
         ],
       ),
     );
@@ -11787,7 +12456,7 @@ class LoanTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
+    final state = context.read<AppController>();
     final progress = loan.amount <= 0 ? 0.0 : loan.repaidAmount / loan.amount;
     final reminders = state.loanRemindersFor(loan.id);
     final overdue = reminders.any((r) => r.isOverdue);
@@ -12338,6 +13007,7 @@ class SettingsScreen extends StatelessWidget {
             SettingsTile(icon: Icons.notifications_active_rounded, title: 'Reminder notification', subtitle: state.reminderEnabled ? 'Daily at ${state.reminderTime.format(context)}' : 'Disabled', color: '#FBC879', onTap: () => showReminderSheet(context)),
             SettingsTile(icon: Icons.lightbulb_rounded, title: 'Savings suggestion profile', subtitle: state.savingsSuggestionProfile.shortLabel, color: '#FFB5D0', onTap: () => showSavingsSuggestionProfileSheet(context)),
             SettingsTile(icon: Icons.cloud_sync_rounded, title: 'Account & sync', subtitle: state.cloudSyncEnabled ? '${state.syncStatus} • ${state.syncAccountEmail}' : 'Sign in for multi-device sync', color: '#78D8E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MultiDeviceSyncScreen()))),
+            SettingsTile(icon: Icons.system_update_alt_rounded, title: 'Updates', subtitle: state.updateStatusMessage, color: '#00D7E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const UpdatesScreen()))),
             SettingsTile(icon: Icons.filter_alt_rounded, title: 'Default date filter', subtitle: _dateRangeLabel(state.dateRangeType), color: '#B4A5FF', onTap: () => showDateRangeSheet(context)),
             SettingsTile(icon: Icons.ios_share_rounded, title: 'Export', subtitle: 'CSV / PDF reports with current filters', color: '#FFB5D0', onTap: () => showExportSheet(context)),
             SettingsTile(icon: Icons.tune_rounded, title: 'Advanced settings', subtitle: 'Defaults, reorder, app lock, backup', color: '#9AD0F5', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdvancedSettingsScreen()))),
@@ -12389,6 +13059,491 @@ class SettingsTile extends StatelessWidget {
           onTap: onTap,
         ),
       ),
+    );
+  }
+}
+
+class UpdatesScreen extends StatelessWidget {
+  const UpdatesScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppController>();
+    final release = state.latestGithubRelease;
+    final releaseDate = release?.publishedAt == null ? 'Not available' : DateFormat('MMM d, yyyy • h:mm a').format(release!.publishedAt!.toLocal());
+    return PageScaffold(
+      title: 'Updates',
+      subtitle: updateRepositorySlug,
+      child: ResponsiveContent(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ExpressiveCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      iconBubble(context, 'download', '#00D7E8', size: 54),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Koinly updates', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                            const SizedBox(height: 4),
+                            Text(state.updateStatusMessage, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  MiniMetric('Installed version', appVersion, Icons.phone_android_rounded),
+                  const SizedBox(height: 10),
+                  MiniMetric('Latest version', release?.displayVersion ?? 'Not checked', Icons.new_releases_rounded),
+                  const SizedBox(height: 10),
+                  MiniMetric('Release date', releaseDate, Icons.event_rounded),
+                  const SizedBox(height: 16),
+                  FilledButton.icon(
+                    onPressed: state.updateCheckBusy
+                        ? null
+                        : () async {
+                            final result = await context.read<AppController>().checkForUpdates(manual: true);
+                            if (context.mounted && result.hasUpdate) {
+                              await showUpdateBottomSheet(context);
+                            }
+                          },
+                    icon: state.updateCheckBusy
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.refresh_rounded),
+                    label: Text(state.updateCheckBusy ? 'Checking...' : 'Check for updates'),
+                  ),
+                  if (state.hasAvailableUpdate) ...[
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      onPressed: () => showUpdateBottomSheet(context),
+                      icon: const Icon(Icons.system_update_alt_rounded),
+                      label: const Text('Show update details'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (release != null) ...[
+              const SectionHeader('Latest release changelog'),
+              ExpressiveCard(child: ReleaseChangelogView(markdown: release.body)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> showUpdateBottomSheet(BuildContext context) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (sheetContext) {
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: .84,
+        minChildSize: .48,
+        maxChildSize: .96,
+        builder: (context, scrollController) {
+          return Consumer<AppController>(
+            builder: (context, state, _) {
+              final release = state.latestGithubRelease;
+              if (release == null) {
+                return ListView(
+                  controller: scrollController,
+                  padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
+                  children: const [EmptyCard(icon: Icons.system_update_alt_rounded, title: 'No update details', body: 'Check for updates first.')],
+                );
+              }
+              final releaseDate = release.publishedAt == null ? 'Release date unavailable' : DateFormat('MMM d, yyyy').format(release.publishedAt!.toLocal());
+              return ListView(
+                controller: scrollController,
+                padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
+                children: [
+                  Row(
+                    children: [
+                      iconBubble(context, 'download', '#00D7E8', size: 54),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Update ${release.displayVersion}', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
+                            const SizedBox(height: 3),
+                            Text(releaseDate, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  ExpressiveCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text("What's New", style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                        const SizedBox(height: 10),
+                        ReleaseChangelogView(markdown: release.body),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  const UpdateActionPanel(),
+                  const SizedBox(height: 10),
+                  TextButton(onPressed: () => Navigator.pop(sheetContext), child: const Text('Later')),
+                ],
+              );
+            },
+          );
+        },
+      );
+    },
+  );
+}
+
+class UpdateActionPanel extends StatelessWidget {
+  const UpdateActionPanel({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppController>();
+    if (Platform.isAndroid) return _AndroidUpdateActionPanel(state: state);
+    if (Platform.isWindows) return _WindowsUpdateActionPanel(state: state);
+    return ExpressiveCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Download update', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          Text('Open the GitHub release page for this platform.', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: () {
+              final url = state.latestGithubRelease?.htmlUrl;
+              if (url != null && url.isNotEmpty) launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+            },
+            icon: const Icon(Icons.open_in_new_rounded),
+            label: const Text('Open release page'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AndroidUpdateActionPanel extends StatelessWidget {
+  const _AndroidUpdateActionPanel({required this.state});
+
+  final AppController state;
+
+  @override
+  Widget build(BuildContext context) {
+    final assets = state.availableAndroidUpdateAssets;
+    if (assets.isEmpty) {
+      return const EmptyCard(icon: Icons.android_rounded, title: 'No Android APK found', body: 'This GitHub release does not include ARM64, ARM32, x86_64, or Universal APK assets.');
+    }
+    if (state.updateDownloadBusy && state.updateDownloadProgress != null) {
+      return DownloadProgressCard(
+        architecture: state.selectedAndroidUpdateKind.label,
+        progress: state.updateDownloadProgress!,
+        onCancel: () => unawaited(state.cancelUpdateDownload()),
+      );
+    }
+
+    final pendingKind = state.pendingAndroidUpdateKind;
+    final pendingVersion = state.pendingAndroidUpdateVersion;
+    return ExpressiveCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Android architecture', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: assets.entries.map((entry) {
+              final selected = state.selectedAndroidUpdateKind == entry.key;
+              final sizeText = entry.value.sizeBytes > 0 ? ' • ${formatBytes(entry.value.sizeBytes)}' : '';
+              return ChoiceChip(
+                selected: selected,
+                label: Text('${entry.key.label}$sizeText'),
+                onSelected: (_) => context.read<AppController>().selectAndroidUpdateKind(entry.key),
+              );
+            }).toList(),
+          ),
+          if (pendingKind != null && pendingVersion == state.latestGithubRelease?.displayVersion) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => unawaited(state.installPendingAndroidUpdate()),
+              icon: const Icon(Icons.install_mobile_rounded),
+              label: Text('Install ${pendingKind.label} update'),
+            ),
+          ],
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: state.selectedAndroidUpdateAsset == null ? null : () => unawaited(state.downloadSelectedAndroidUpdate()),
+            icon: const Icon(Icons.download_rounded),
+            label: const Text('Download update'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WindowsUpdateActionPanel extends StatelessWidget {
+  const _WindowsUpdateActionPanel({required this.state});
+
+  final AppController state;
+
+  @override
+  Widget build(BuildContext context) {
+    final asset = state.windowsUpdateInstallerAsset;
+    return ExpressiveCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Windows installer', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          Text(
+            asset == null ? 'No installer asset was found. The GitHub release page will open instead.' : '${asset.name}${asset.sizeBytes > 0 ? ' • ${formatBytes(asset.sizeBytes)}' : ''}',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: () => unawaited(state.openWindowsUpdate()),
+            icon: const Icon(Icons.open_in_new_rounded),
+            label: Text(asset == null ? 'Open release page' : 'Open Windows installer'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class DownloadProgressCard extends StatelessWidget {
+  const DownloadProgressCard({super.key, required this.architecture, required this.progress, required this.onCancel});
+
+  final String architecture;
+  final DownloadProgressSnapshot progress;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return ExpressiveCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text('Downloading $architecture', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              Text('${progress.percent}%', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900, color: kSleekAccent)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          WaveProgressIndicator(progress: progress.fraction),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(child: Text('${progress.downloadedText} / ${progress.totalText}', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800))),
+              Text(progress.speedText, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(progress.status, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: progress.percent >= 100 ? kSleekIncome : kSleekAccent, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(onPressed: onCancel, icon: const Icon(Icons.close_rounded), label: const Text('Cancel download')),
+        ],
+      ),
+    );
+  }
+}
+
+class WaveProgressIndicator extends StatefulWidget {
+  const WaveProgressIndicator({super.key, required this.progress});
+
+  final double progress;
+
+  @override
+  State<WaveProgressIndicator> createState() => _WaveProgressIndicatorState();
+}
+
+class _WaveProgressIndicatorState extends State<WaveProgressIndicator> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..repeat();
+    if (widget.progress >= 1) _controller.stop();
+  }
+
+  @override
+  void didUpdateWidget(covariant WaveProgressIndicator oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.progress >= 1 && _controller.isAnimating) {
+      _controller.stop();
+    } else if (widget.progress < 1 && !_controller.isAnimating) {
+      _controller.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 92,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) => CustomPaint(
+          painter: _WaveProgressPainter(progress: widget.progress, phase: _controller.value, color: kSleekAccent),
+          child: const SizedBox.expand(),
+        ),
+      ),
+    );
+  }
+}
+
+class _WaveProgressPainter extends CustomPainter {
+  const _WaveProgressPainter({required this.progress, required this.phase, required this.color});
+
+  final double progress;
+  final double phase;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final radius = BorderRadius.circular(24);
+    final rect = Offset.zero & size;
+    final rrect = radius.toRRect(rect);
+    final bgPaint = Paint()..color = kSleekSurfaceHigher.withValues(alpha: .72);
+    canvas.drawRRect(rrect, bgPaint);
+    canvas.save();
+    canvas.clipRRect(rrect);
+    final fillTop = size.height * (1 - progress.clamp(0, 1));
+    final path = Path()..moveTo(0, size.height);
+    path.lineTo(0, fillTop);
+    for (double x = 0; x <= size.width; x += 4) {
+      final y = fillTop + math.sin((x / size.width * math.pi * 2) + phase * math.pi * 2) * 7;
+      path.lineTo(x, y);
+    }
+    path.lineTo(size.width, size.height);
+    path.close();
+    final fillPaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [color.withValues(alpha: .95), color.withValues(alpha: .45)],
+      ).createShader(rect);
+    canvas.drawPath(path, fillPaint);
+    canvas.restore();
+    final borderPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2
+      ..color = color.withValues(alpha: .34);
+    canvas.drawRRect(rrect, borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _WaveProgressPainter oldDelegate) => oldDelegate.progress != progress || oldDelegate.phase != phase || oldDelegate.color != color;
+}
+
+class ReleaseChangelogView extends StatelessWidget {
+  const ReleaseChangelogView({super.key, required this.markdown});
+
+  final String markdown;
+
+  @override
+  Widget build(BuildContext context) {
+    final blocks = ChangelogParser.parse(markdown);
+    if (blocks.isEmpty) {
+      return Text('No changelog was provided for this release.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700));
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: blocks.map((block) => _ChangelogBlockView(block: block)).toList(),
+    );
+  }
+}
+
+class _ChangelogBlockView extends StatelessWidget {
+  const _ChangelogBlockView({required this.block});
+
+  final ChangelogBlock block;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    switch (block.type) {
+      case ChangelogBlockType.heading:
+        return Padding(
+          padding: const EdgeInsets.only(top: 8, bottom: 6),
+          child: Text(block.plainText, style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+        );
+      case ChangelogBlockType.bullet:
+        return _ChangelogLine(prefix: '•', block: block);
+      case ChangelogBlockType.numbered:
+        return _ChangelogLine(prefix: '${block.number ?? 1}.', block: block);
+      case ChangelogBlockType.paragraph:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: _LinkedSegmentsText(segments: block.segments),
+        );
+    }
+  }
+}
+
+class _ChangelogLine extends StatelessWidget {
+  const _ChangelogLine({required this.prefix, required this.block});
+
+  final String prefix;
+  final ChangelogBlock block;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 24, child: Text(prefix, style: const TextStyle(fontWeight: FontWeight.w900, color: kSleekAccent))),
+          Expanded(child: _LinkedSegmentsText(segments: block.segments)),
+        ],
+      ),
+    );
+  }
+}
+
+class _LinkedSegmentsText extends StatelessWidget {
+  const _LinkedSegmentsText({required this.segments});
+
+  final List<MarkdownTextSegment> segments;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.35, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: .92), fontWeight: FontWeight.w700);
+    return Wrap(
+      children: segments.map((segment) {
+        if (segment.url == null) return Text(segment.text, style: style);
+        return InkWell(
+          onTap: () => launchUrl(Uri.parse(segment.url!), mode: LaunchMode.externalApplication),
+          child: Text(segment.text, style: style?.copyWith(color: kSleekAccent, decoration: TextDecoration.underline, fontWeight: FontWeight.w900)),
+        );
+      }).toList(),
     );
   }
 }
@@ -12900,7 +14055,6 @@ class _SyncDatabaseProviderConfigScreenState extends State<SyncDatabaseProviderC
   late final TextEditingController _tursoDatabaseUrlController;
   late final TextEditingController _tursoAuthTokenController;
   bool _obscureMongoUrl = true;
-  bool _obscureTursoToken = true;
   bool _testing = false;
   String? _status;
 
@@ -13278,7 +14432,6 @@ class _SyncAdvancedDatabasePopupState extends State<SyncAdvancedDatabasePopup> {
   late final TextEditingController _tursoDatabaseUrlController;
   late final TextEditingController _tursoAuthTokenController;
   bool _obscureMongoUrl = true;
-  bool _obscureTursoToken = true;
   bool _testing = false;
   String? _status;
 
@@ -13541,12 +14694,6 @@ class _ProviderChoiceCard extends StatelessWidget {
       ),
     );
   }
-}
-
-extension _BubbleOverride on Widget {
-  Widget withIcon(IconData icon) => Builder(builder: (context) {
-        return Stack(alignment: Alignment.center, children: [this, Icon(icon, color: colorFromHex('#FFFFFF').withOpacity(0), size: 0)]);
-      });
 }
 
 Future<void> showThemeDialog(BuildContext context) async {

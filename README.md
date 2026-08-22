@@ -1,6 +1,6 @@
 # Koinly
 
-A local-first personal finance tracker built in Flutter with a polished Material 3 mobile and desktop UI. Koinly helps users manage accounts, transactions, categories, budgets, loans, savings, reminders, reports, exports, and local backups from one Android or Windows app.
+A local-first personal finance tracker built in Flutter with a polished Material 3 mobile and desktop UI. Koinly helps users manage accounts, transactions, categories, budgets, savings, reminders, reports, exports, and local backups from one Android or Windows app.
 
 ![Koinly banner](assets/images/koinly-banner.png)
 
@@ -14,6 +14,8 @@ A local-first personal finance tracker built in Flutter with a polished Material
 - Android `versionName`, Android `versionCode`, `pubspec.yaml`, Windows installer version, and the in-app About screen version are updated during CI.
 - Manual edits to `pubspec.yaml`, `android/app/build.gradle`, and `lib/main.dart` are no longer required for normal release version bumps.
 - Windows installer output remains `KoinlySetup.exe`.
+- Stable production tags use semantic versions such as `v1.0.1042`.
+- In-app update checks read public GitHub Releases from `SiamTestingProject/TelePlayer`.
 
 ---
 
@@ -23,7 +25,7 @@ A local-first personal finance tracker built in Flutter with a polished Material
 | --- | --- |
 | App framework | Flutter / Dart |
 | Platforms | Android and Windows |
-| UI system | Material 3 Expressive-style cards, motion, centered popups, adaptive spacing |
+| UI system | Dark glass finance dashboard inspired by the latest Koinly mockup, with cyan glow accents, compact cards, quick actions, motion, centered popups, and adaptive spacing |
 | Local database | SQLite via `sqflite` and desktop SQLite FFI |
 | State management | `provider` + `ChangeNotifier` |
 | Analytics/crash reporting | Firebase Analytics + Crashlytics with optional initialization |
@@ -33,9 +35,57 @@ A local-first personal finance tracker built in Flutter with a polished Material
 | Local sync state | SQLite outbox, cursor, entity versions, and conflict records |
 | Backup/restore | Local `.koinlybackup` files |
 | CI build | GitHub Actions for Android APKs and Windows installer |
-| Android outputs | Universal, ARM32, ARM64 release APKs |
+| Android outputs | Universal, ARM32, ARM64, x86_64 release APKs and Android App Bundle |
 | Windows output | `KoinlySetup.exe` |
 | License | Apache License 2.0 |
+
+---
+
+## In-app updates
+
+Koinly includes a GitHub Releases-based updater.
+
+- Automatic update check runs after app startup.
+- Manual update check is available in **Settings → Updates**.
+- Draft GitHub releases are ignored.
+- Prereleases are ignored in production builds and can be included in development builds with `KOINLY_INCLUDE_PRERELEASE_UPDATES=true`.
+- Version comparison is semantic, so `1.4.10` correctly sorts after `1.4.8`, and `1.10.0` correctly sorts after `1.4.10`.
+- Release notes are fetched from the actual GitHub Release body and rendered inside the app.
+- Android downloads APKs in-app and opens Android’s installer automatically after download.
+- If Android blocks unknown-app installs, Koinly opens the system “Allow from this source” page and resumes installation when the user returns.
+- If the installer is cancelled after a successful download, **Settings → Updates** shows an install action for the existing APK instead of forcing another download.
+- Windows prefers semantic installer assets such as `Koinly-v1.0.1042-Setup.exe`; if no installer is available, the GitHub release page opens.
+
+Expected release assets:
+
+- `Koinly-v<version>-arm64.apk`
+- `Koinly-v<version>-arm32.apk`
+- `Koinly-v<version>-x86_64.apk`
+- `Koinly-v<version>-universal.apk`
+- `Koinly-v<version>.aab`
+- `Koinly-v<version>-Setup.exe`
+
+Release notes come from `CHANGELOG.md`. The workflow first looks for the current version section, then falls back to `## Unreleased`, so stable releases still publish meaningful notes instead of a generic one-line body.
+
+---
+
+## Visual design
+
+- Deep navy app background with soft cyan/blue glow layers.
+- Glass-style cards and bottom navigation with subtle borders and shadows.
+- Home dashboard includes quick actions for Accounts, Add transaction, Categories, and Analysis.
+- Balance, account, transaction, and category surfaces use the same compact rounded-card language across Android and desktop.
+
+---
+
+## Performance notes
+
+- App shell rebuilds are scoped to the values that actually affect the shell, such as theme and selected tab.
+- Account, category, reminder, and balance lookups are cached after every database reload so long lists do not repeatedly scan the full in-memory dataset.
+- Money formatting reuses cached formatters instead of creating a new formatter for every visible amount.
+- Home dashboard category totals reuse the already-filtered transaction list.
+- Background online sync uses incremental pulls and avoids global busy-state rebuilds; manual sync/sign-in can still fully overwrite local finance data when required.
+- Small icon images use medium filtering to reduce GPU work while scrolling.
 
 ---
 
@@ -59,12 +109,12 @@ Added for the current app:
 - onboarding login/create-account actions
 - onboarding skip-accounts flow
 - Hidden Settings naming
-- single-toggle category and loan filters
+- single-toggle category filters
 - account-based automatic multi-device sync
 - server-authoritative sync download behavior
 - Financial Health Summary popup behavior
 - daily 10 Savings Account suggestion bubbles
-- loan repayment reminders and budget alert summary behavior
+- budget alert summary behavior
 
 
 ## Core data rules
@@ -75,10 +125,6 @@ Koinly is strict about money classification.
 - Expense counts only as expense.
 - Regular transfers are internal.
 - Savings transfers are internal and never count as income or expense.
-- Given Loans reduce the selected paying account.
-- Taken Loans increase the selected receiving account.
-- Loan principal movement does not inflate income/expense.
-- Loan repayments update loan balance and account balance.
 - Bills and subscriptions are tracked separately for reminders and summaries.
 - Budget usage comes from real expense category spending.
 - Exports follow active filters.
@@ -103,10 +149,6 @@ Income and expense categories are managed from one page. Expense/Income uses one
 
 Budgets support monthly limits, category scope, account scope, progress tracking, remaining budget, and alert levels. Status can be safe, warning, near limit, limit reached, or overspent. Budget data is included in Financial Health Summary.
 
-### Loans
-
-Loans support Given Loans and Taken Loans. Given/Taken uses one toggle button. Open/Completed uses one toggle button. Given Loan means money goes out; Taken Loan means money comes in. Partial repayments, repayment history, overdue highlighting, and loan repayment reminders are supported. Loan activity is included in Financial Health Summary but excluded from normal income/expense totals.
-
 ### Savings
 
 Savings has a dedicated Savings Accounts page. Transfers into and out of Savings are internal transfers. Savings activity appears separately in summaries. Savings suggestion profile is available in Settings. The Savings page shows 10 daily mystery `?` suggestion bubbles. Tapping a bubble opens the full suggestion. Checked suggestions are saved for the day. After all 10 are checked, no more appear until the next day.
@@ -115,15 +157,15 @@ Savings has a dedicated Savings Accounts page. Transfers into and out of Savings
 
 Financial Health Summary is not a fixed Analysis page section. It appears automatically after a month or year ends. Users can go through summary pages or skip all. Skipped and reviewed summaries are remembered.
 
-The summary includes income, expenses, net flow, savings transfers, savings balance movement, current savings balance, loans given/taken, repayments paid/received, recurring bills/subscriptions, paid/unpaid/upcoming/overdue bills, loan repayment reminder status, partial repayments, overdue alerts, budget usage, remaining budget, overspent categories, and a health result.
+The summary includes income, expenses, net flow, savings transfers, savings balance movement, current savings balance, recurring bills/subscriptions, paid/unpaid/upcoming/overdue bills, budget usage, remaining budget, overspent categories, and a health result.
 
 Possible status results include Saved Money, Overspent, Increased Debt, Reduced Debt, Stable Month, Stable Year, and Strong Savings Growth.
 
-Yearly view includes month-by-month income, expense, savings, loans, repayments, bills, budget usage, best month, worst month, highest income month, highest expense month, highest savings month, and most overspent month.
+Yearly view includes month-by-month income, expense, savings, bills, budget usage, best month, worst month, highest income month, highest expense month, highest savings month, and most overspent month.
 
 ### Reminders
 
-Reminder-related data supports bills, subscriptions, tuition, rent, internet bills, mobile recharge, electricity bills, EMI payments, scheduled payments, loan repayments, partial repayments, and overdue alerts. Reminder status is included in Financial Health Summary.
+Reminder-related data supports bills, subscriptions, tuition, rent, internet bills, mobile recharge, electricity bills, EMI payments, scheduled payments, and overdue alerts. Reminder status is included in Financial Health Summary.
 
 ### Analysis and reports
 
@@ -182,9 +224,9 @@ Backup files use `.koinlybackup`. Backup includes local app data and preferences
 | --- | --- |
 | ![Home](assets/images/readme/home.png) | ![Transactions](assets/images/readme/transactions.png) |
 
-| Categories | Loans |
-| --- | --- |
-| ![Categories](assets/images/readme/categories.png) | ![Loans](assets/images/readme/loans.png) |
+| Categories |
+| --- |
+| ![Categories](assets/images/readme/categories.png) |
 
 | Analysis |
 | --- |
@@ -247,9 +289,9 @@ The app is currently implemented mainly in `lib/main.dart`. GitHub Actions can r
 
 ## Data model overview
 
-The app stores local data for accounts, categories, transactions, budgets, loans, repayments, loan repayment reminders, savings suggestion profile, daily savings suggestion seen status, settings/preferences, backup metadata, and sync metadata.
+The app stores local data for accounts, categories, transactions, budgets, savings suggestion profile, daily savings suggestion seen status, settings/preferences, backup metadata, and sync metadata. Legacy loan tables are preserved internally for backup/sync compatibility while the user-facing loan feature is hidden for now.
 
-Important classification fields include transaction type, account IDs, category ID, loan metadata, transfer target, created date/time, reminder status, and budget scope.
+Important classification fields include transaction type, account IDs, category ID, transfer target, created date/time, reminder status, and budget scope.
 
 ---
 
@@ -323,10 +365,12 @@ Workflow:
 The workflow builds:
 
 ```text
-artifacts/koinly-universal-release.apk
-artifacts/koinly-armeabi-v7a-release.apk
-artifacts/koinly-arm64-v8a-release.apk
-artifacts/KoinlySetup.exe
+artifacts/Koinly-v<version>-universal.apk
+artifacts/Koinly-v<version>-arm32.apk
+artifacts/Koinly-v<version>-arm64.apk
+artifacts/Koinly-v<version>-x86_64.apk
+artifacts/Koinly-v<version>.aab
+artifacts/Koinly-v<version>-Setup.exe
 ```
 
 Workflow behavior:
@@ -344,7 +388,7 @@ Workflow behavior:
 - preserves Android signing support
 - preserves Windows signing support
 - generates Windows installer
-- publishes APKs and `KoinlySetup.exe` to a new versioned stable GitHub Release for every build
+- publishes APKs, AAB, and the Windows setup installer to a new versioned stable GitHub Release for every build
 - patches Windows CMake compatibility where needed
 - patches the generated Windows runner title to show `Koinly`
 
@@ -378,10 +422,12 @@ Stable release publishing:
 Tag: v1.0.<BUILD_NUMBER>
 Release title: Koinly Stable 1.0.<BUILD_NUMBER>
 Assets:
-- koinly-universal-release.apk
-- koinly-armeabi-v7a-release.apk
-- koinly-arm64-v8a-release.apk
-- KoinlySetup.exe
+- Koinly-v<version>-universal.apk
+- Koinly-v<version>-arm32.apk
+- Koinly-v<version>-arm64.apk
+- Koinly-v<version>-x86_64.apk
+- Koinly-v<version>.aab
+- Koinly-v<version>-Setup.exe
 ```
 
 Each successful build creates or updates only its own versioned release. Older

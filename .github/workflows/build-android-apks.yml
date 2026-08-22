@@ -30,10 +30,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -106,29 +106,43 @@ jobs:
         run: |
           flutter build apk \
             --release \
-            --target-platform android-arm,android-arm64 \
+            --target-platform android-arm,android-arm64,android-x64 \
             --build-name="$KOINLY_APP_VERSION_NAME" \
             --build-number="$KOINLY_APP_BUILD_NUMBER" \
             --no-pub \
             --no-tree-shake-icons \
             --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
             --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
-          cp build/app/outputs/flutter-apk/app-release.apk artifacts/koinly-universal-release.apk
+          cp build/app/outputs/flutter-apk/app-release.apk "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-universal.apk"
 
-      - name: Build ARM32 and ARM64 split APKs
+      - name: Build ARM32, ARM64, and x86_64 split APKs
         run: |
           flutter build apk \
             --release \
             --split-per-abi \
-            --target-platform android-arm,android-arm64 \
+            --target-platform android-arm,android-arm64,android-x64 \
             --build-name="$KOINLY_APP_VERSION_NAME" \
             --build-number="$KOINLY_APP_BUILD_NUMBER" \
             --no-pub \
             --no-tree-shake-icons \
             --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
             --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
-          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk artifacts/koinly-armeabi-v7a-release.apk
-          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk artifacts/koinly-arm64-v8a-release.apk
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-arm32.apk"
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-arm64.apk"
+          cp build/app/outputs/flutter-apk/app-x86_64-release.apk "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-x86_64.apk"
+
+      - name: Build Android App Bundle
+        run: |
+          flutter build appbundle \
+            --release \
+            --target-platform android-arm,android-arm64,android-x64 \
+            --build-name="$KOINLY_APP_VERSION_NAME" \
+            --build-number="$KOINLY_APP_BUILD_NUMBER" \
+            --no-pub \
+            --no-tree-shake-icons \
+            --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
+            --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
+          cp build/app/outputs/bundle/release/app-release.aab "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}.aab"
 
       - name: List APK artifacts
         run: ls -lh artifacts
@@ -146,10 +160,12 @@ jobs:
           done
 
       - name: Upload release APKs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
-          name: koinly-release-apks
-          path: artifacts/*.apk
+          name: koinly-android-release-assets
+          path: |
+            artifacts/*.apk
+            artifacts/*.aab
           if-no-files-found: error
           compression-level: 0
 
@@ -161,7 +177,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -457,21 +473,21 @@ jobs:
         run: |
           if ($env:WINDOWS_SIGNING_ENABLED -ne "true") {
             Write-Host "Skipping Windows installer signing because WINDOWS_CODESIGN_PFX_BASE64 is not configured."
-            exit 0
+          } else {
+            $installer = (Resolve-Path "artifacts/KoinlySetup.exe").Path
+            & "$env:WINDOWS_SIGNTOOL_PATH" sign /f "$env:WINDOWS_CODESIGN_CERT" /p "$env:WINDOWS_CODESIGN_PASSWORD" /fd SHA256 /tr "$env:WINDOWS_CODESIGN_TIMESTAMP_URL" /td SHA256 "$installer"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to sign KoinlySetup.exe" }
+
+            & "$env:WINDOWS_SIGNTOOL_PATH" verify /pa /v "$installer"
+            if ($LASTEXITCODE -ne 0) { throw "KoinlySetup.exe signature verification failed" }
           }
-
-          $installer = (Resolve-Path "artifacts/KoinlySetup.exe").Path
-          & "$env:WINDOWS_SIGNTOOL_PATH" sign /f "$env:WINDOWS_CODESIGN_CERT" /p "$env:WINDOWS_CODESIGN_PASSWORD" /fd SHA256 /tr "$env:WINDOWS_CODESIGN_TIMESTAMP_URL" /td SHA256 "$installer"
-          if ($LASTEXITCODE -ne 0) { throw "Failed to sign KoinlySetup.exe" }
-
-          & "$env:WINDOWS_SIGNTOOL_PATH" verify /pa /v "$installer"
-          if ($LASTEXITCODE -ne 0) { throw "KoinlySetup.exe signature verification failed" }
+          Copy-Item -Path "artifacts/KoinlySetup.exe" -Destination "artifacts/Koinly-v$env:KOINLY_APP_VERSION_NAME-Setup.exe" -Force
 
       - name: Upload Windows installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: koinly-windows-installer
-          path: artifacts/KoinlySetup.exe
+          path: artifacts/Koinly-v*-Setup.exe
           if-no-files-found: error
           compression-level: 0
 
@@ -487,18 +503,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Download APK artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
-          name: koinly-release-apks
+          name: koinly-android-release-assets
           path: release-assets
 
       - name: Download Windows installer artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: koinly-windows-installer
           path: release-assets
@@ -517,6 +533,27 @@ jobs:
           VERSION_NAME="1.0.${BUILD_NUMBER}"
           RELEASE_TAG="v${VERSION_NAME}"
           RELEASE_TITLE="Koinly Stable ${VERSION_NAME}"
+          awk -v version="${VERSION_NAME}" '
+            BEGIN { capture=0; found=0 }
+            /^##[[:space:]]+\[?v?[0-9]+\.[0-9]+\.[0-9]+\]?/ {
+              if (capture) exit
+              if ($0 ~ version) { capture=1; found=1; next }
+            }
+            /^##[[:space:]]+Unreleased/ {
+              if (capture) exit
+              if (!found) { capture=1; next }
+            }
+            /^##[[:space:]]+/ && capture { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes-body.md
+          if [ ! -s release-notes-body.md ]; then
+            awk 'BEGIN { capture=0 } /^##[[:space:]]+/ { if (capture) exit; capture=1; next } capture { print }' CHANGELOG.md > release-notes-body.md
+          fi
+          {
+            echo "Stable Koinly ${VERSION_NAME} release built from commit ${GITHUB_SHA}."
+            echo
+            cat release-notes-body.md
+          } > release-notes.md
 
           if ! git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
             git tag "${RELEASE_TAG}" "$GITHUB_SHA"
@@ -527,11 +564,13 @@ jobs:
             gh release upload "${RELEASE_TAG}" release-assets/* --clobber
             gh release edit "${RELEASE_TAG}" \
               --title "${RELEASE_TITLE}" \
-              --notes "Stable Koinly ${VERSION_NAME} release built from commit $GITHUB_SHA." \
+              --notes-file release-notes.md \
               --latest
           else
             gh release create "${RELEASE_TAG}" release-assets/* \
               --title "${RELEASE_TITLE}" \
-              --notes "Stable Koinly ${VERSION_NAME} release built from commit $GITHUB_SHA." \
+              --notes-file release-notes.md \
               --latest
           fi
+          RELEASE_ID=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id')
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -f draft=false -f prerelease=false -f make_latest=true
