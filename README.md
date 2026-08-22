@@ -332,15 +332,19 @@ artifacts/KoinlySetup.exe
 Workflow behavior:
 - supports manual dispatch
 - supports push to `main` or `master`
+- cancels older in-progress release builds on the same branch when a newer push starts
 - requires `KOINLY_SYNC_API_BASE_URL` as a GitHub repository secret or variable
 - automatically stamps each build version from `github.run_number`
 - passes the generated version into Flutter through `KOINLY_APP_VERSION`
 - updates Android `versionName` and `versionCode` before APK builds
 - updates `pubspec.yaml` before Windows installer packaging
+- uses Flutter/Gradle caching where available
+- uses `--no-pub` after dependency restore so release builds do not resolve packages repeatedly
+- uploads already-compressed APK/EXE artifacts with artifact compression disabled for faster transfer
 - preserves Android signing support
 - preserves Windows signing support
 - generates Windows installer
-- publishes APKs and `KoinlySetup.exe` to the `Koinly Stable` GitHub Release
+- publishes APKs and `KoinlySetup.exe` to a new versioned stable GitHub Release for every build
 - patches Windows CMake compatibility where needed
 - patches the generated Windows runner title to show `Koinly`
 
@@ -371,8 +375,8 @@ KoinlySetup.exe
 Stable release publishing:
 
 ```text
-Tag: stable
-Release title: Koinly Stable
+Tag: v1.0.<BUILD_NUMBER>
+Release title: Koinly Stable 1.0.<BUILD_NUMBER>
 Assets:
 - koinly-universal-release.apk
 - koinly-armeabi-v7a-release.apk
@@ -380,8 +384,9 @@ Assets:
 - KoinlySetup.exe
 ```
 
-Each successful build updates the `stable` tag to the current commit and
-replaces the assets on the `Koinly Stable` release.
+Each successful build creates or updates only its own versioned release. Older
+release builds remain available in GitHub Releases instead of being deleted by
+the next update.
 
 ---
 

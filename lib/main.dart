@@ -6051,6 +6051,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                               icon: const Icon(Icons.person_add_alt_rounded),
                               label: const Text('Create account'),
                             ),
+                            TextButton.icon(
+                              onPressed: () => controller.nextPage(duration: AppMotion.medium, curve: Curves.easeOutCubic),
+                              icon: const Icon(Icons.wifi_off_rounded),
+                              label: const Text('Use offline'),
+                            ),
                           ],
                         ),
                       ),

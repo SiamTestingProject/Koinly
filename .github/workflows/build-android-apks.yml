@@ -15,12 +15,18 @@ on:
       - "pubspec.lock"
       - ".github/workflows/build-android-apks.yml"
 
+concurrency:
+  group: koinly-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-apks:
     name: Build ARM32, ARM64, and universal APKs
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.jvmargs=-Xmx4g"
 
     steps:
       - name: Checkout repository
@@ -31,6 +37,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -102,6 +109,7 @@ jobs:
             --target-platform android-arm,android-arm64 \
             --build-name="$KOINLY_APP_VERSION_NAME" \
             --build-number="$KOINLY_APP_BUILD_NUMBER" \
+            --no-pub \
             --no-tree-shake-icons \
             --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
             --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
@@ -115,6 +123,7 @@ jobs:
             --target-platform android-arm,android-arm64 \
             --build-name="$KOINLY_APP_VERSION_NAME" \
             --build-number="$KOINLY_APP_BUILD_NUMBER" \
+            --no-pub \
             --no-tree-shake-icons \
             --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
             --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
@@ -142,6 +151,7 @@ jobs:
           name: koinly-release-apks
           path: artifacts/*.apk
           if-no-files-found: error
+          compression-level: 0
 
   build-windows:
     name: Build Windows x64 installer EXE
@@ -312,7 +322,7 @@ jobs:
         run: |
           $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
           $env:CL = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
-          flutter build windows --release --dart-define=KOINLY_APP_VERSION="$env:KOINLY_APP_VERSION_NAME" --dart-define=KOINLY_SYNC_API_BASE_URL="$env:KOINLY_SYNC_API_BASE_URL"
+          flutter build windows --release --no-pub --dart-define=KOINLY_APP_VERSION="$env:KOINLY_APP_VERSION_NAME" --dart-define=KOINLY_SYNC_API_BASE_URL="$env:KOINLY_SYNC_API_BASE_URL"
 
       - name: Normalize Windows release executable name
         shell: pwsh
@@ -463,6 +473,7 @@ jobs:
           name: koinly-windows-installer
           path: artifacts/KoinlySetup.exe
           if-no-files-found: error
+          compression-level: 0
 
   publish-stable-release:
     name: Publish stable GitHub Release
@@ -495,20 +506,32 @@ jobs:
       - name: List release assets
         run: ls -lh release-assets
 
-      - name: Publish stable release
+      - name: Publish versioned stable release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f stable "$GITHUB_SHA"
-          git push origin refs/tags/stable --force
 
-          if gh release view stable >/dev/null 2>&1; then
-            gh release delete stable --yes
+          BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))
+          VERSION_NAME="1.0.${BUILD_NUMBER}"
+          RELEASE_TAG="v${VERSION_NAME}"
+          RELEASE_TITLE="Koinly Stable ${VERSION_NAME}"
+
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            git tag "${RELEASE_TAG}" "$GITHUB_SHA"
+            git push origin "refs/tags/${RELEASE_TAG}"
           fi
 
-          gh release create stable release-assets/* \
-            --title "Koinly Stable" \
-            --notes "Stable Koinly release built from commit $GITHUB_SHA." \
-            --latest
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" release-assets/* --clobber
+            gh release edit "${RELEASE_TAG}" \
+              --title "${RELEASE_TITLE}" \
+              --notes "Stable Koinly ${VERSION_NAME} release built from commit $GITHUB_SHA." \
+              --latest
+          else
+            gh release create "${RELEASE_TAG}" release-assets/* \
+              --title "${RELEASE_TITLE}" \
+              --notes "Stable Koinly ${VERSION_NAME} release built from commit $GITHUB_SHA." \
+              --latest
+          fi
