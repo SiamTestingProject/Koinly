@@ -10,7 +10,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 const updateGithubOwner = 'SiamTestingProject';
-const updateGithubRepo = 'TelePlayer';
+const updateGithubRepo = 'Koinly';
 const updateGithubApiBase = 'https://api.github.com';
 const updateRepositorySlug = '$updateGithubOwner/$updateGithubRepo';
 const includePrereleaseUpdates = bool.fromEnvironment(

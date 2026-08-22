@@ -15,7 +15,7 @@ A local-first personal finance tracker built in Flutter with a polished Material
 - Manual edits to `pubspec.yaml`, `android/app/build.gradle`, and `lib/main.dart` are no longer required for normal release version bumps.
 - Windows installer output remains `KoinlySetup.exe`.
 - Stable production tags use semantic versions such as `v1.0.1042`.
-- In-app update checks read public GitHub Releases from `SiamTestingProject/TelePlayer`.
+- In-app update checks read public GitHub Releases from `SiamTestingProject/Koinly`.
 
 ---
 
@@ -25,7 +25,7 @@ A local-first personal finance tracker built in Flutter with a polished Material
 | --- | --- |
 | App framework | Flutter / Dart |
 | Platforms | Android and Windows |
-| UI system | Dark glass finance dashboard inspired by the latest Koinly mockup, with cyan glow accents, compact cards, quick actions, motion, centered popups, and adaptive spacing |
+| UI system | Dark glass finance dashboard inspired by the latest Koinly mockup, with cyan accents, compact cards, centered popups, and adaptive spacing |
 | Local database | SQLite via `sqflite` and desktop SQLite FFI |
 | State management | `provider` + `ChangeNotifier` |
 | Analytics/crash reporting | Firebase Analytics + Crashlytics with optional initialization |
@@ -55,6 +55,7 @@ Koinly includes a GitHub Releases-based updater.
 - If Android blocks unknown-app installs, Koinly opens the system “Allow from this source” page and resumes installation when the user returns.
 - If the installer is cancelled after a successful download, **Settings → Updates** shows an install action for the existing APK instead of forcing another download.
 - Windows prefers semantic installer assets such as `Koinly-v1.0.1042-Setup.exe`; if no installer is available, the GitHub release page opens.
+- Android CI generates the Universal APK from the AAB with bundletool, avoiding one extra full Flutter Android compile.
 
 Expected release assets:
 
@@ -71,9 +72,9 @@ Release notes come from `CHANGELOG.md`. The workflow first looks for the current
 
 ## Visual design
 
-- Deep navy app background with soft cyan/blue glow layers.
+- Deep navy app background with lightweight cyan accents.
 - Glass-style cards and bottom navigation with subtle borders and shadows.
-- Home dashboard includes quick actions for Accounts, Add transaction, Categories, and Analysis.
+- Home dashboard focuses on balance, accounts, budgets, and category spending without the old Quick actions block.
 - Balance, account, transaction, and category surfaces use the same compact rounded-card language across Android and desktop.
 
 ---
@@ -86,6 +87,7 @@ Release notes come from `CHANGELOG.md`. The workflow first looks for the current
 - Home dashboard category totals reuse the already-filtered transaction list.
 - Background online sync uses incremental pulls and avoids global busy-state rebuilds; manual sync/sign-in can still fully overwrite local finance data when required.
 - Small icon images use medium filtering to reduce GPU work while scrolling.
+- Page transitions now use shorter fade-only motion, and the heavy background glow layers were removed to reduce animation jank on both Windows and Android.
 
 ---
 
@@ -107,7 +109,7 @@ Added for the current app:
 - Windows title/executable branding as `Koinly`
 - Material 3 Expressive UI behavior
 - onboarding login/create-account actions
-- onboarding skip-accounts flow
+- onboarding skip-accounts flow that removes untouched starter accounts
 - Hidden Settings naming
 - single-toggle category filters
 - account-based automatic multi-device sync
@@ -384,6 +386,7 @@ Workflow behavior:
 - updates `pubspec.yaml` before Windows installer packaging
 - uses Flutter/Gradle caching where available
 - uses `--no-pub` after dependency restore so release builds do not resolve packages repeatedly
+- generates the Universal APK from the AAB with bundletool instead of running a separate universal APK compile
 - uploads already-compressed APK/EXE artifacts with artifact compression disabled for faster transfer
 - preserves Android signing support
 - preserves Windows signing support

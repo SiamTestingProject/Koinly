@@ -1187,12 +1187,17 @@ class KoinlyDatabase {
       for (final row in rows) {
         final account = Account.fromMap(row);
         if (!starterNames.contains(account.name) || account.amount != 0 || account.creditLimit != 0) continue;
-        final references = sql.Sqflite.firstIntValue(await txn.rawQuery(
+        final transactionReferences = sql.Sqflite.firstIntValue(await txn.rawQuery(
               '''
               SELECT COUNT(*) FROM transactions
-              WHERE account_id = ? OR from_account_id = ? OR to_account_id = ?
+              WHERE from_account_id = ? OR to_account_id = ?
               ''',
-              [account.id, account.id, account.id],
+              [account.id, account.id],
+            )) ??
+            0;
+        final budgetReferences = sql.Sqflite.firstIntValue(await txn.rawQuery(
+              'SELECT COUNT(*) FROM budget_accounts WHERE account_id = ?',
+              [account.id],
             )) ??
             0;
         final loanReferences = sql.Sqflite.firstIntValue(await txn.rawQuery(
@@ -1200,7 +1205,7 @@ class KoinlyDatabase {
               [account.id],
             )) ??
             0;
-        if (references == 0 && loanReferences == 0) {
+        if (transactionReferences == 0 && budgetReferences == 0 && loanReferences == 0) {
           await txn.delete('accounts', where: 'id = ?', whereArgs: [account.id]);
         }
       }
@@ -4114,14 +4119,14 @@ class AppBreakpoints {
 class AppMotion {
   const AppMotion._();
 
-  static const Duration fast = Duration(milliseconds: 150);
-  static const Duration medium = Duration(milliseconds: 260);
-  static const Duration slow = Duration(milliseconds: 420);
+  static const Duration fast = Duration(milliseconds: 90);
+  static const Duration medium = Duration(milliseconds: 140);
+  static const Duration slow = Duration(milliseconds: 220);
 
   static const Curve standard = Cubic(0.2, 0.0, 0.0, 1.0);
   static const Curve emphasized = Cubic(0.05, 0.7, 0.1, 1.0);
   static const Curve emphasizedAccelerate = Cubic(0.3, 0.0, 0.8, 0.15);
-  static const Curve spring = Curves.easeOutBack;
+  static const Curve spring = Curves.easeOutCubic;
 }
 
 class AppShapes {
@@ -4150,16 +4155,8 @@ class KoinlyPageTransitionsBuilder extends PageTransitionsBuilder {
     Widget child,
   ) {
     if (route.isFirst) return child;
-    final fade = CurvedAnimation(parent: animation, curve: AppMotion.emphasized, reverseCurve: AppMotion.emphasizedAccelerate);
-    final slide = Tween<Offset>(begin: const Offset(0.035, 0), end: Offset.zero).animate(fade);
-    final scale = Tween<double>(begin: .985, end: 1).animate(fade);
-    return FadeTransition(
-      opacity: fade,
-      child: SlideTransition(
-        position: slide,
-        child: ScaleTransition(scale: scale, child: child),
-      ),
-    );
+    final fade = CurvedAnimation(parent: animation, curve: AppMotion.standard, reverseCurve: AppMotion.emphasizedAccelerate);
+    return FadeTransition(opacity: fade, child: child);
   }
 }
 
@@ -4939,19 +4936,10 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
                   children: [
                     Positioned.fill(
                       child: AnimatedSwitcher(
-                        duration: AppMotion.medium,
-                        switchInCurve: AppMotion.emphasized,
+                        duration: AppMotion.fast,
+                        switchInCurve: AppMotion.standard,
                         switchOutCurve: AppMotion.emphasizedAccelerate,
-                        transitionBuilder: (child, animation) {
-                          final curved = CurvedAnimation(parent: animation, curve: AppMotion.emphasized);
-                          return FadeTransition(
-                            opacity: curved,
-                            child: SlideTransition(
-                              position: Tween<Offset>(begin: const Offset(.018, 0), end: Offset.zero).animate(curved),
-                              child: ScaleTransition(scale: Tween<double>(begin: .992, end: 1).animate(curved), child: child),
-                            ),
-                          );
-                        },
+                        transitionBuilder: (child, animation) => FadeTransition(opacity: animation, child: child),
                         child: KeyedSubtree(key: ValueKey<int>(tabIndex), child: pages[tabIndex]),
                       ),
                     ),
@@ -5271,51 +5259,7 @@ class KoinlyAtmosphere extends StatelessWidget {
           colors: [Color(0xFF021116), Color(0xFF020B0F), Color(0xFF041015)],
         ),
       ),
-      child: Stack(
-        children: [
-          Positioned(
-            top: -150,
-            left: -110,
-            child: IgnorePointer(
-              child: Container(
-                width: 380,
-                height: 380,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: RadialGradient(
-                    colors: [
-                      kSleekAccent.withOpacity(.16),
-                      kSleekAccent.withOpacity(.055),
-                      Colors.transparent,
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          Positioned(
-            right: -170,
-            top: 90,
-            child: IgnorePointer(
-              child: Container(
-                width: 360,
-                height: 360,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: RadialGradient(
-                    colors: [
-                      const Color(0xFF226DFF).withOpacity(.11),
-                      const Color(0xFF00D7E8).withOpacity(.035),
-                      Colors.transparent,
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          Positioned.fill(child: child),
-        ],
-      ),
+      child: child,
     );
   }
 }
@@ -6792,10 +6736,6 @@ class HomeDashboardScreen extends StatelessWidget {
     final topCategories = categoryTotals.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
     final categoryGrandTotal = categoryTotals.values.fold<double>(0, (sum, value) => sum + value);
 
-    void selectTab(int index) {
-      state.selectTabIndex(index);
-    }
-
     final balanceCard = BalanceHeroCard(
       balance: state.format(accountBalance),
       income: state.format(summary.income),
@@ -6873,44 +6813,6 @@ class HomeDashboardScreen extends StatelessWidget {
       ],
     ];
 
-    final quickActionsSection = <Widget>[
-      const SectionHeader('Quick actions'),
-      GridView.count(
-        crossAxisCount: AppBreakpoints.isSmall(context) ? 4 : 4,
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        mainAxisSpacing: 10,
-        crossAxisSpacing: 10,
-        childAspectRatio: AppBreakpoints.isSmall(context) ? .88 : 1.05,
-        children: [
-          QuickActionTile(
-            iconName: 'wallet',
-            iconColor: '#78D8E8',
-            label: 'Accounts',
-            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AccountListScreen())),
-          ),
-          QuickActionTile(
-            iconName: 'salary',
-            iconColor: '#2BD9A1',
-            label: 'Add\ntransaction',
-            onTap: () => showTransactionEditor(context),
-          ),
-          QuickActionTile(
-            iconName: 'store',
-            iconColor: '#F6B44B',
-            label: 'Categories',
-            onTap: () => selectTab(kCategoriesTabIndex),
-          ),
-          QuickActionTile(
-            iconName: 'investment',
-            iconColor: '#8B5CF6',
-            label: 'Analysis',
-            onTap: () => selectTab(1),
-          ),
-        ],
-      ),
-    ];
-
     final categorySection = <Widget>[
       SectionHeader('Category spending'),
       if (topCategories.isEmpty)
@@ -6951,7 +6853,6 @@ class HomeDashboardScreen extends StatelessWidget {
                 children: [
                   balanceCard,
                   ...overdueLoanSection,
-                  ...quickActionsSection,
                   ...accountsSection,
                   ...budgetSection,
                   ...categorySection,
@@ -6969,7 +6870,6 @@ class HomeDashboardScreen extends StatelessWidget {
                     children: [
                       balanceCard,
                       ...overdueLoanSection,
-                      ...quickActionsSection,
                       ...accountsSection,
                       ...budgetSection,
                     ],

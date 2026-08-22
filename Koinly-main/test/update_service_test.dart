@@ -7,6 +7,10 @@ import 'package:http/testing.dart';
 import 'package:koinly/update_service.dart';
 
 void main() {
+  test('uses the Koinly GitHub repository for update checks', () {
+    expect(updateRepositorySlug, 'SiamTestingProject/Koinly');
+  });
+
   group('SemanticVersion', () {
     test('compares semantic versions numerically', () {
       expect(SemanticVersion.tryParse('1.4.10')!.compareTo(SemanticVersion.tryParse('1.4.8')!), greaterThan(0));

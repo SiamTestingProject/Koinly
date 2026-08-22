@@ -102,9 +102,9 @@ jobs:
           fi
           echo "KOINLY_SYNC_API_BASE_URL=$KOINLY_SYNC_API_BASE_URL" >> "$GITHUB_ENV"
 
-      - name: Build universal release APK
+      - name: Build Android App Bundle
         run: |
-          flutter build apk \
+          flutter build appbundle \
             --release \
             --target-platform android-arm,android-arm64,android-x64 \
             --build-name="$KOINLY_APP_VERSION_NAME" \
@@ -113,7 +113,27 @@ jobs:
             --no-tree-shake-icons \
             --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
             --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
-          cp build/app/outputs/flutter-apk/app-release.apk "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-universal.apk"
+          cp build/app/outputs/bundle/release/app-release.aab "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}.aab"
+
+      - name: Generate universal APK from App Bundle
+        run: |
+          BUNDLETOOL_VERSION="1.18.1"
+          curl -L --retry 3 --retry-delay 5 \
+            -o bundletool.jar \
+            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar"
+
+          java -jar bundletool.jar build-apks \
+            --bundle=build/app/outputs/bundle/release/app-release.aab \
+            --output=artifacts/koinly-universal.apks \
+            --mode=universal \
+            --ks=android/app/koinly-release.jks \
+            --ks-key-alias=koinly \
+            --ks-pass=pass:koinly-release \
+            --key-pass=pass:koinly-release \
+            --overwrite
+
+          unzip -p artifacts/koinly-universal.apks universal.apk > "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-universal.apk"
+          rm -f artifacts/koinly-universal.apks bundletool.jar
 
       - name: Build ARM32, ARM64, and x86_64 split APKs
         run: |
@@ -130,19 +150,6 @@ jobs:
           cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-arm32.apk"
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-arm64.apk"
           cp build/app/outputs/flutter-apk/app-x86_64-release.apk "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-x86_64.apk"
-
-      - name: Build Android App Bundle
-        run: |
-          flutter build appbundle \
-            --release \
-            --target-platform android-arm,android-arm64,android-x64 \
-            --build-name="$KOINLY_APP_VERSION_NAME" \
-            --build-number="$KOINLY_APP_BUILD_NUMBER" \
-            --no-pub \
-            --no-tree-shake-icons \
-            --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
-            --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
-          cp build/app/outputs/bundle/release/app-release.aab "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}.aab"
 
       - name: List APK artifacts
         run: ls -lh artifacts
