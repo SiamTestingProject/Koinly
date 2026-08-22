@@ -48,7 +48,7 @@ const Color kSleekWarning = Color(0xFFF59E0B);
 const Color kSleekMuted = Color(0xFF7C8A92);
 
 const appTitle = 'Koinly';
-const appVersion = '1.0.70';
+const appVersion = String.fromEnvironment('KOINLY_APP_VERSION', defaultValue: '1.0.70');
 const backupPassword = 'YOUR_SECRET_PASSWORD';
 const kSyncAdminTelegramUrl = 'https://t.me/Ch0wdhury_Siam';
 
@@ -1169,6 +1169,34 @@ class KoinlyDatabase {
   Future<void> upsertAccount(Account account) async => (await db).insert('accounts', account.toMap(), conflictAlgorithm: sql.ConflictAlgorithm.replace);
 
   Future<void> deleteAccount(String id) async => (await db).delete('accounts', where: 'id = ?', whereArgs: [id]);
+
+  Future<void> deleteUntouchedStarterAccounts() async {
+    final database = await db;
+    final starterNames = const {'Cash', 'Card', 'Bank Account'};
+    final rows = await database.query('accounts');
+    await database.transaction((txn) async {
+      for (final row in rows) {
+        final account = Account.fromMap(row);
+        if (!starterNames.contains(account.name) || account.amount != 0 || account.creditLimit != 0) continue;
+        final references = sql.Sqflite.firstIntValue(await txn.rawQuery(
+              '''
+              SELECT COUNT(*) FROM transactions
+              WHERE account_id = ? OR from_account_id = ? OR to_account_id = ?
+              ''',
+              [account.id, account.id, account.id],
+            )) ??
+            0;
+        final loanReferences = sql.Sqflite.firstIntValue(await txn.rawQuery(
+              'SELECT COUNT(*) FROM loans WHERE account_id = ?',
+              [account.id],
+            )) ??
+            0;
+        if (references == 0 && loanReferences == 0) {
+          await txn.delete('accounts', where: 'id = ?', whereArgs: [account.id]);
+        }
+      }
+    });
+  }
 
   Future<void> reorderAccounts(List<Account> ordered) async {
     final database = await db;
@@ -2912,20 +2940,14 @@ class AppController extends ChangeNotifier {
       final session = register
           ? await api.register(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName())
           : await api.login(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName());
-      final hasLocalActivity = await database.hasLocalUserActivity();
       await _saveSyncSession(session);
       await database.writeSyncState('serverCursor', '0');
       if (register) {
         await database.enqueueAllForAdoption(await exportPreferences());
         await performMultiDeviceSync(silent: true);
       } else {
-        if (hasLocalActivity) {
-          await database.enqueueAllForAdoption(await exportPreferences());
-          await performMultiDeviceSync(silent: true);
-        } else {
-          await database.clearFinanceDataForRemoteLogin();
-          await performMultiDeviceSync(silent: true, pushLocalChanges: false);
-        }
+        await database.clearFinanceDataForRemoteLogin();
+        await performMultiDeviceSync(silent: true, pushLocalChanges: false);
       }
     } catch (error) {
       cloudSyncError = _cleanSyncError(error);
@@ -3029,16 +3051,19 @@ class AppController extends ChangeNotifier {
         }
       }
 
-      var cursor = int.tryParse(await database.readSyncState('serverCursor', '0')) ?? 0;
+      var cursor = 0;
       var hasMore = true;
+      final remoteChanges = <Map<String, dynamic>>[];
       while (hasMore) {
         final response = await api.pull(accessToken: syncAccessToken, cursor: cursor, limit: 100);
         final changes = (response['changes'] as List? ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
-        await database.applyRemoteChanges(changes, importPreferences);
+        remoteChanges.addAll(changes);
         cursor = (response['cursor'] as num? ?? cursor).toInt();
         hasMore = response['hasMore'] == true;
-        await database.writeSyncState('serverCursor', '$cursor');
       }
+      await database.clearFinanceDataForRemoteLogin();
+      await database.applyRemoteChanges(remoteChanges, importPreferences);
+      await database.writeSyncState('serverCursor', '$cursor');
 
       cloudSyncLastAt = DateTime.now();
       await prefs.setString('cloudSyncLastAt', cloudSyncLastAt!.toIso8601String());
@@ -3160,6 +3185,16 @@ class AppController extends ChangeNotifier {
     defaultIncomeCategoryId ??= categories.where((c) => c.type == CategoryType.income && !c.isLoanSystemCategory).firstOrNull?.id;
     notifyListeners();
     if (queueSync) queueCloudSync();
+  }
+
+  Future<void> skipStarterAccounts() async {
+    await database.deleteUntouchedStarterAccounts();
+    final remainingAccounts = await database.accounts();
+    if (defaultAccountId != null && !remainingAccounts.any((account) => account.id == defaultAccountId)) {
+      defaultAccountId = remainingAccounts.where((a) => a.type != AccountType.savings).firstOrNull?.id ?? remainingAccounts.firstOrNull?.id;
+      await prefs.setString('defaultAccountId', defaultAccountId ?? '');
+    }
+    await reload(queueSync: false);
   }
 
   Future<bool> authenticate() async {
@@ -5968,6 +6003,18 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final controller = PageController();
   int index = 0;
 
+  Future<void> _openAccountSync({required bool createAccount}) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MultiDeviceSyncScreen(
+          completeOnAuth: true,
+          initialRegisterMode: createAccount,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppController>();
@@ -5989,9 +6036,33 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         icon: Icons.account_balance_wallet_rounded,
                         title: 'Track money without losing detail',
                         body: 'Accounts, categories, transactions, budgets, loans, analysis, exports, reminders, and local backup are available from the first setup.',
+                        actions: Wrap(
+                          alignment: WrapAlignment.center,
+                          spacing: 12,
+                          runSpacing: 12,
+                          children: [
+                            FilledButton.icon(
+                              onPressed: () => _openAccountSync(createAccount: false),
+                              icon: const Icon(Icons.login_rounded),
+                              label: const Text('Login'),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: () => _openAccountSync(createAccount: true),
+                              icon: const Icon(Icons.person_add_alt_rounded),
+                              label: const Text('Create account'),
+                            ),
+                          ],
+                        ),
                       ),
                       CurrencySetupPane(state: state),
-                      AccountSetupPane(state: state),
+                      AccountSetupPane(
+                        state: state,
+                        onSkip: () async {
+                          await state.skipStarterAccounts();
+                          if (!mounted) return;
+                          await controller.nextPage(duration: AppMotion.medium, curve: Curves.easeOutCubic);
+                        },
+                      ),
                       _OnboardingPane(
                         icon: Icons.privacy_tip_rounded,
                         title: 'Private local database',
@@ -6086,10 +6157,11 @@ class OnboardingPageFrame extends StatelessWidget {
 }
 
 class _OnboardingPane extends StatelessWidget {
-  const _OnboardingPane({required this.icon, required this.title, required this.body});
+  const _OnboardingPane({required this.icon, required this.title, required this.body, this.actions});
   final IconData icon;
   final String title;
   final String body;
+  final Widget? actions;
 
   @override
   Widget build(BuildContext context) {
@@ -6104,6 +6176,10 @@ class _OnboardingPane extends StatelessWidget {
           Text(title, textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
           const SizedBox(height: 16),
           Text(body, textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyLarge),
+          if (actions != null) ...[
+            const SizedBox(height: 24),
+            actions!,
+          ],
         ],
       ),
     );
@@ -6134,8 +6210,9 @@ class CurrencySetupPane extends StatelessWidget {
 }
 
 class AccountSetupPane extends StatelessWidget {
-  const AccountSetupPane({super.key, required this.state});
+  const AccountSetupPane({super.key, required this.state, required this.onSkip});
   final AppController state;
+  final Future<void> Function() onSkip;
 
   @override
   Widget build(BuildContext context) {
@@ -6147,13 +6224,29 @@ class AccountSetupPane extends StatelessWidget {
           const SizedBox(height: 24),
           Text('Accounts are ready', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
           const SizedBox(height: 12),
-          const Text('The app preloads Cash, Card, and Bank Account. You can create, edit, delete, reorder, and configure credit limits later.', textAlign: TextAlign.center),
+          const Text('Use the starter accounts, create your own, or skip this step to start with no accounts.', textAlign: TextAlign.center),
           const SizedBox(height: 24),
           ...state.accounts.map((a) => Padding(
                 padding: const EdgeInsets.only(bottom: 10),
                 child: AccountTile(account: a, onTap: () => showAccountEditor(context, account: a)),
               )),
-          OutlinedButton.icon(onPressed: () => showAccountEditor(context, allowedTypes: const [AccountType.regular, AccountType.credit]), icon: const Icon(Icons.add_rounded), label: const Text('Create account')),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => showAccountEditor(context, allowedTypes: const [AccountType.regular, AccountType.credit]),
+                icon: const Icon(Icons.add_rounded),
+                label: const Text('Create account'),
+              ),
+              TextButton.icon(
+                onPressed: onSkip,
+                icon: const Icon(Icons.skip_next_rounded),
+                label: const Text('Skip accounts'),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -12296,7 +12389,14 @@ class SettingsTile extends StatelessWidget {
 }
 
 class MultiDeviceSyncScreen extends StatefulWidget {
-  const MultiDeviceSyncScreen({super.key});
+  const MultiDeviceSyncScreen({
+    super.key,
+    this.completeOnAuth = false,
+    this.initialRegisterMode = false,
+  });
+
+  final bool completeOnAuth;
+  final bool initialRegisterMode;
 
   @override
   State<MultiDeviceSyncScreen> createState() => _MultiDeviceSyncScreenState();
@@ -12306,6 +12406,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
   late final TextEditingController _emailController;
   late final TextEditingController _passwordController;
   bool _obscurePassword = true;
+  late bool _registerMode;
 
   @override
   void initState() {
@@ -12313,6 +12414,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
     final state = context.read<AppController>();
     _emailController = TextEditingController(text: state.syncAccountEmail);
     _passwordController = TextEditingController();
+    _registerMode = widget.initialRegisterMode;
   }
 
   @override
@@ -12340,6 +12442,10 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
     if (mounted && state.cloudSyncError == null) {
       _passwordController.clear();
       showSnack(context, register ? 'Account created. Sync started.' : 'Signed in. Sync started.');
+      if (widget.completeOnAuth) {
+        await state.completeOnboarding();
+        if (mounted) Navigator.pop(context);
+      }
     }
   }
 
@@ -12436,13 +12542,20 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                 ),
               ),
             const SizedBox(height: 16),
+            if (!signedIn) ...[
+              Text(
+                _registerMode ? 'Create your Koinly sync account' : 'Login to your Koinly sync account',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 10),
+            ],
             if (signedIn)
               Wrap(
                 spacing: 10,
                 runSpacing: 10,
                 children: [
                   FilledButton.icon(
-                    onPressed: busy ? null : () => state.performMultiDeviceSync(),
+                    onPressed: busy ? null : () => state.syncFromCloud(),
                     icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.sync_rounded),
                     label: const Text('Sync now'),
                   ),
@@ -12459,20 +12572,22 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                 runSpacing: 10,
                 children: [
                   FilledButton.icon(
-                    onPressed: busy || !backendConfigured ? null : () => _login(register: false),
-                    icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.login_rounded),
-                    label: const Text('Sign in'),
+                    onPressed: busy || !backendConfigured ? null : () => _login(register: _registerMode),
+                    icon: busy
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                        : Icon(_registerMode ? Icons.person_add_alt_rounded : Icons.login_rounded),
+                    label: Text(_registerMode ? 'Create account' : 'Login'),
                   ),
                   OutlinedButton.icon(
-                    onPressed: busy || !backendConfigured ? null : () => _login(register: true),
-                    icon: const Icon(Icons.person_add_alt_rounded),
-                    label: const Text('Create account'),
+                    onPressed: busy ? null : () => setState(() => _registerMode = !_registerMode),
+                    icon: Icon(_registerMode ? Icons.login_rounded : Icons.person_add_alt_rounded),
+                    label: Text(_registerMode ? 'Use login instead' : 'Create account instead'),
                   ),
                 ],
               ),
             const SizedBox(height: 16),
             Text(
-              'Koinly saves changes locally first, then syncs them automatically in the background. Local backup and restore remain separate safety tools.',
+              'Sync now downloads the cloud copy and fully replaces local finance data on this device. New local changes still upload automatically in the background. Local backup and restore remain separate safety tools.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
             ),
           ],

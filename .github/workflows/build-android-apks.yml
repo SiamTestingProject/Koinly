@@ -48,7 +48,7 @@ jobs:
 
       - name: Restore Android Gradle wrapper files
         run: |
-          flutter create --platforms=android --project-name koinly_flutter .
+          flutter create --platforms=android --project-name koinly .
           git checkout -- android/app/build.gradle android/build.gradle android/settings.gradle android/gradle.properties android/app/src/main/AndroidManifest.xml || true
           rm -f android/build.gradle.kts android/settings.gradle.kts android/app/build.gradle.kts
           find android/app/src/main/res -type f \( -name "ic_launcher.png" -o -name "ic_launcher_round.png" -o -name "ic_launcher_foreground.png" \) -delete
@@ -64,6 +64,17 @@ jobs:
           zipStorePath=wrapper/dists
           distributionUrl=https\://services.gradle.org/distributions/gradle-8.14.1-bin.zip
           EOF_GRADLE
+
+      - name: Stamp automatic app version
+        run: |
+          BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))
+          VERSION_NAME="1.0.${BUILD_NUMBER}"
+          echo "KOINLY_APP_VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
+          echo "KOINLY_APP_BUILD_NUMBER=${BUILD_NUMBER}" >> "$GITHUB_ENV"
+          sed -i -E "s/^version:.*/version: ${VERSION_NAME}+${BUILD_NUMBER}/" pubspec.yaml
+          sed -i -E "s/versionCode = [0-9]+/versionCode = ${BUILD_NUMBER}/" android/app/build.gradle
+          sed -i -E "s/versionName = \"[^\"]+\"/versionName = \"${VERSION_NAME}\"/" android/app/build.gradle
+          grep -nE "^(version:)|versionCode|versionName" pubspec.yaml android/app/build.gradle
 
       - name: Show Flutter version
         run: flutter --version
@@ -89,7 +100,10 @@ jobs:
           flutter build apk \
             --release \
             --target-platform android-arm,android-arm64 \
+            --build-name="$KOINLY_APP_VERSION_NAME" \
+            --build-number="$KOINLY_APP_BUILD_NUMBER" \
             --no-tree-shake-icons \
+            --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
             --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
           cp build/app/outputs/flutter-apk/app-release.apk artifacts/koinly-universal-release.apk
 
@@ -99,7 +113,10 @@ jobs:
             --release \
             --split-per-abi \
             --target-platform android-arm,android-arm64 \
+            --build-name="$KOINLY_APP_VERSION_NAME" \
+            --build-number="$KOINLY_APP_BUILD_NUMBER" \
             --no-tree-shake-icons \
+            --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
             --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
           cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk artifacts/koinly-armeabi-v7a-release.apk
           cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk artifacts/koinly-arm64-v8a-release.apk
@@ -149,7 +166,28 @@ jobs:
         run: flutter config --enable-windows-desktop
 
       - name: Generate Windows platform files
-        run: flutter create --platforms=windows --project-name koinly_flutter .
+        run: flutter create --platforms=windows --project-name koinly .
+
+      - name: Apply Koinly Windows window title
+        shell: pwsh
+        run: |
+          $mainCpp = "windows/runner/main.cpp"
+          if (!(Test-Path $mainCpp)) {
+            throw "Windows runner main.cpp was not generated: $mainCpp"
+          }
+          $main = Get-Content $mainCpp -Raw
+          $main = $main -replace 'CreateAndShow\(L"[^"]+"', 'CreateAndShow(L"Koinly"'
+          Set-Content -Path $mainCpp -Value $main -Encoding UTF8
+
+          $resourceRc = "windows/runner/Runner.rc"
+          if (Test-Path $resourceRc) {
+            $rc = Get-Content $resourceRc -Raw
+            $rc = $rc -replace 'VALUE "FileDescription", "[^"]+"', 'VALUE "FileDescription", "Koinly"'
+            $rc = $rc -replace 'VALUE "InternalName", "[^"]+"', 'VALUE "InternalName", "Koinly"'
+            $rc = $rc -replace 'VALUE "OriginalFilename", "[^"]+"', 'VALUE "OriginalFilename", "Koinly.exe"'
+            $rc = $rc -replace 'VALUE "ProductName", "[^"]+"', 'VALUE "ProductName", "Koinly"'
+            Set-Content -Path $resourceRc -Value $rc -Encoding UTF8
+          }
 
       - name: Apply Koinly Windows app icon
         shell: pwsh
@@ -166,6 +204,19 @@ jobs:
           if (!(Test-Path $iconDest)) {
             throw "Windows icon was not copied: $iconDest"
           }
+
+      - name: Stamp automatic app version
+        shell: pwsh
+        run: |
+          $buildNumber = 1000 + [int]$env:GITHUB_RUN_NUMBER
+          $versionName = "1.0.$buildNumber"
+          "KOINLY_APP_VERSION_NAME=$versionName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "KOINLY_APP_BUILD_NUMBER=$buildNumber" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $pubspec = Get-Content "pubspec.yaml" -Raw
+          $pubspec = $pubspec -replace '(?m)^version:\s*.*$', "version: $versionName+$buildNumber"
+          Set-Content -Path "pubspec.yaml" -Value $pubspec -Encoding UTF8
+          Select-String -Path "pubspec.yaml" -Pattern "^version:"
 
       - name: Patch Windows CMake for CMake 4/Firebase compatibility
         shell: pwsh
@@ -261,13 +312,13 @@ jobs:
         run: |
           $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
           $env:CL = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
-          flutter build windows --release --dart-define=KOINLY_SYNC_API_BASE_URL="$env:KOINLY_SYNC_API_BASE_URL"
+          flutter build windows --release --dart-define=KOINLY_APP_VERSION="$env:KOINLY_APP_VERSION_NAME" --dart-define=KOINLY_SYNC_API_BASE_URL="$env:KOINLY_SYNC_API_BASE_URL"
 
       - name: Normalize Windows release executable name
         shell: pwsh
         run: |
           $releaseDir = Resolve-Path "build/windows/x64/runner/Release"
-          $defaultExe = Join-Path $releaseDir "koinly_flutter.exe"
+          $defaultExe = Join-Path $releaseDir "koinly.exe"
           $namedExe = Join-Path $releaseDir "Koinly.exe"
           if (Test-Path $defaultExe) {
             Move-Item -Path $defaultExe -Destination $namedExe -Force

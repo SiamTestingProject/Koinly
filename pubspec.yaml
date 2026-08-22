@@ -1,4 +1,4 @@
-name: koinly_flutter
+name: koinly
 description: Flutter rebuild of the Koinly personal finance tracker with adaptive Material 3 UI for Android and Windows.
 publish_to: "none"
 version: 1.0.70+71

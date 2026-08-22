@@ -1,4 +1,4 @@
-# Koinly Flutter
+# Koinly
 
 A local-first personal finance tracker built in Flutter with a polished Material 3 mobile and desktop UI. Koinly helps users manage accounts, transactions, categories, budgets, loans, savings, reminders, reports, exports, and local backups from one Android or Windows app.
 
@@ -6,13 +6,14 @@ A local-first personal finance tracker built in Flutter with a polished Material
 
 ---
 
-## Current app version
+## App versioning
 
-- App version: `1.0.70+71`
-- Android `versionName`: `1.0.70`
-- Android `versionCode`: `71`
-- Windows installer output: `KoinlySetup.exe`
-- Every project update must bump `pubspec.yaml`, `android/app/build.gradle`, and `lib/main.dart`.
+- Baseline source version: `1.0.70+71`
+- GitHub Actions automatically stamps each release build with a newer version.
+- Generated version format: `1.0.<1000 + github.run_number>`
+- Android `versionName`, Android `versionCode`, `pubspec.yaml`, Windows installer version, and the in-app About screen version are updated during CI.
+- Manual edits to `pubspec.yaml`, `android/app/build.gradle`, and `lib/main.dart` are no longer required for normal release version bumps.
+- Windows installer output remains `KoinlySetup.exe`.
 
 ---
 
@@ -52,10 +53,15 @@ Kept from the uploaded version where still accurate:
 
 Added for the current app:
 - Windows installer workflow and `KoinlySetup.exe`
+- automatic GitHub Actions version stamping
+- Windows title/executable branding as `Koinly`
 - Material 3 Expressive UI behavior
+- onboarding login/create-account actions
+- onboarding skip-accounts flow
 - Hidden Settings naming
 - single-toggle category and loan filters
 - account-based automatic multi-device sync
+- server-authoritative sync download behavior
 - Financial Health Summary popup behavior
 - daily 10 Savings Account suggestion bubbles
 - loan repayment reminders and budget alert summary behavior
@@ -327,11 +333,28 @@ Workflow behavior:
 - supports manual dispatch
 - supports push to `main` or `master`
 - requires `KOINLY_SYNC_API_BASE_URL` as a GitHub repository secret or variable
+- automatically stamps each build version from `github.run_number`
+- passes the generated version into Flutter through `KOINLY_APP_VERSION`
+- updates Android `versionName` and `versionCode` before APK builds
+- updates `pubspec.yaml` before Windows installer packaging
 - preserves Android signing support
 - preserves Windows signing support
 - generates Windows installer
 - publishes APKs and `KoinlySetup.exe` to the `Koinly Stable` GitHub Release
 - patches Windows CMake compatibility where needed
+- patches the generated Windows runner title to show `Koinly`
+
+Automatic versioning:
+
+```text
+BUILD_NUMBER = 1000 + github.run_number
+VERSION_NAME = 1.0.<BUILD_NUMBER>
+pubspec.yaml = VERSION_NAME+BUILD_NUMBER
+Android versionName = VERSION_NAME
+Android versionCode = BUILD_NUMBER
+About screen = VERSION_NAME
+Windows installer version = VERSION_NAME
+```
 
 App build config:
 
