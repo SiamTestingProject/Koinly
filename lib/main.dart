@@ -1496,6 +1496,28 @@ class KoinlyDatabase {
     await _migrateLoanAccountSelection(database);
   }
 
+  Future<bool> hasLocalUserActivity() async {
+    final database = await db;
+    for (final table in ['transactions', 'budgets', 'loans', 'loan_repayments', 'loan_repayment_reminders']) {
+      final rows = await database.query(table, columns: ['COUNT(*) AS count']);
+      if ((rows.first['count'] as num? ?? 0).toInt() > 0) return true;
+    }
+    return false;
+  }
+
+  Future<void> clearFinanceDataForRemoteLogin() async {
+    final database = await db;
+    final tables = ['loan_repayment_reminders', 'loan_repayments', 'loans', 'budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
+    await database.transaction((txn) async {
+      for (final table in tables) {
+        await txn.delete(table);
+      }
+      await txn.delete('sync_outbox');
+      await txn.delete('sync_entity_versions');
+      await txn.delete('sync_conflicts');
+    });
+  }
+
   static const syncTables = [
     'accounts',
     'categories',
@@ -2890,9 +2912,21 @@ class AppController extends ChangeNotifier {
       final session = register
           ? await api.register(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName())
           : await api.login(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName());
+      final hasLocalActivity = await database.hasLocalUserActivity();
       await _saveSyncSession(session);
-      await database.enqueueAllForAdoption(await exportPreferences());
-      await performMultiDeviceSync(silent: true);
+      await database.writeSyncState('serverCursor', '0');
+      if (register) {
+        await database.enqueueAllForAdoption(await exportPreferences());
+        await performMultiDeviceSync(silent: true);
+      } else {
+        if (hasLocalActivity) {
+          await database.enqueueAllForAdoption(await exportPreferences());
+          await performMultiDeviceSync(silent: true);
+        } else {
+          await database.clearFinanceDataForRemoteLogin();
+          await performMultiDeviceSync(silent: true, pushLocalChanges: false);
+        }
+      }
     } catch (error) {
       cloudSyncError = _cleanSyncError(error);
       syncStatus = 'Sync error';
@@ -2956,8 +2990,11 @@ class AppController extends ChangeNotifier {
     try {
       final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
       if (pushLocalChanges) {
-        final pending = await database.pendingSyncOperations(limit: 50);
-        if (pending.isNotEmpty) {
+        var uploadPass = 0;
+        while (uploadPass < 100) {
+          uploadPass += 1;
+          final pending = await database.pendingSyncOperations(limit: 100);
+          if (pending.isEmpty) break;
           final operations = pending.map(_operationFromOutboxRow).toList();
           final response = await api.push(accessToken: syncAccessToken, operations: operations);
           final accepted = (response['accepted'] as List? ?? const []).cast<Map>();
@@ -2970,16 +3007,25 @@ class AppController extends ChangeNotifier {
             versions[operationId] = (item['version'] as num? ?? 0).toInt();
           }
           await database.markOutboxUploaded(acceptedIds, versions);
+
           final conflicts = (response['conflicts'] as List? ?? const []).cast<Map>();
+          final conflictedIds = <String>[];
           for (final conflict in conflicts) {
+            final operationId = conflict['operationId']?.toString() ?? '';
+            if (operationId.isNotEmpty) conflictedIds.add(operationId);
             await database.saveSyncConflict(
               entityType: conflict['entityType']?.toString() ?? '',
               entityId: conflict['entityId']?.toString() ?? '',
-              localOperationId: conflict['operationId']?.toString(),
+              localOperationId: operationId.isEmpty ? null : operationId,
               serverVersion: (conflict['serverVersion'] as num? ?? 0).toInt(),
               details: jsonEncode(conflict),
             );
           }
+          await database.markOutboxUploaded(conflictedIds, const {});
+
+          // Avoid spinning forever on a malformed response that neither accepts
+          // nor rejects the attempted operations.
+          if (acceptedIds.isEmpty && conflictedIds.isEmpty) break;
         }
       }
 
