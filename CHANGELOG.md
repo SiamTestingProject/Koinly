@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed clean ZIP packaging on Windows so entries use GitHub-compatible `/` paths instead of literal backslash filenames.
+- Ensured workflow files package as `.github/workflows/*.yml`, allowing GitHub Actions to detect them after upload.
 - Continued Phase 13 source-structure cleanup by extracting shared icon lookup/rendering helpers into `lib/icon_helpers.dart`.
 - Reduced `lib/main.dart` further by moving reusable icon glyph and icon bubble UI helpers out of the main app file.
 - Continued Phase 12 source-structure cleanup by extracting reusable Koinly branding widgets into `lib/branding_widgets.dart`.

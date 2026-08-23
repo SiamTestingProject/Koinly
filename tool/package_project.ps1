@@ -30,8 +30,20 @@ if (Test-Path -LiteralPath $OutputPath) {
   Remove-Item -LiteralPath $OutputPath -Force
 }
 
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory($stagingProject, $OutputPath)
+$zip = [System.IO.Compression.ZipFile]::Open($OutputPath, [System.IO.Compression.ZipArchiveMode]::Create)
+try {
+  $stagingProjectFullPath = [System.IO.Path]::GetFullPath($stagingProject).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+  Get-ChildItem -LiteralPath $stagingProjectFullPath -Recurse -File | ForEach-Object {
+    $fileFullPath = [System.IO.Path]::GetFullPath($_.FullName)
+    $relativePath = $fileFullPath.Substring($stagingProjectFullPath.Length).TrimStart([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $entryName = $relativePath.Replace([System.IO.Path]::DirectorySeparatorChar, '/').Replace([System.IO.Path]::AltDirectorySeparatorChar, '/')
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $fileFullPath, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+  }
+} finally {
+  $zip.Dispose()
+}
 Remove-Item -LiteralPath $stagingRoot -Recurse -Force
 
 $zip = [System.IO.Compression.ZipFile]::OpenRead($OutputPath)
@@ -42,4 +54,3 @@ try {
 } finally {
   $zip.Dispose()
 }
-

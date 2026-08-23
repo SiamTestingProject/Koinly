@@ -156,6 +156,7 @@ Koinly includes local helper scripts for repeatable validation and clean ZIP han
 - The validation helper supports `-PubGetTimeoutSeconds`, `-AnalyzeTimeoutSeconds`, and `-TestTimeoutSeconds`, plus `-SkipPubGet`, `-SkipAnalyze`, and `-SkipTests` for targeted checks.
 - Run `tool\package_project.ps1 -OutputPath C:\path\Koinly-clean.zip` to create a clean project ZIP.
 - Clean packages intentionally exclude `cloud\worker\node_modules`, build folders, caches, temporary outputs, and generated logs so the ZIP stays small and uploadable.
+- Clean packages force ZIP entry paths to use `/` so GitHub receives real folders such as `.github/workflows` instead of Windows-style backslash filenames.
 - If analyzer timeouts continue, the next structural fix is to split the current large `lib\main.dart` into smaller feature files so Dart analysis can resolve the app incrementally.
 - Phase 8 started that split by moving shared app config/constants and finance models out of `lib\main.dart`.
 - Phase 9 continued the split by moving reusable UI foundation primitives out of `lib\main.dart`.
@@ -163,6 +164,7 @@ Koinly includes local helper scripts for repeatable validation and clean ZIP han
 - Phase 11 continued the split by moving reminder scheduling and sync network/database helper services out of `lib\main.dart`.
 - Phase 12 continued the split by moving reusable branding and collection utility code out of `lib\main.dart`.
 - Phase 13 continued the split by moving reusable icon lookup/rendering helpers out of `lib\main.dart`.
+- Phase 14 fixed clean ZIP path separators so GitHub Actions workflow files upload as real `.github/workflows` files.
 
 ---
 
@@ -194,6 +196,7 @@ Added for the current app:
 - Phase 11 source split with `lib/reminder_service.dart` and `lib/sync_services.dart`
 - Phase 12 source split with `lib/branding_widgets.dart` and `lib/collection_utils.dart`
 - Phase 13 source split with `lib/icon_helpers.dart`
+- Phase 14 GitHub/ForgePort ZIP path separator fix for automated Actions workflow detection
 - onboarding login/create-account actions
 - onboarding skip-accounts flow that removes untouched starter accounts
 - Hidden Settings naming
