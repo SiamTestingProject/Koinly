@@ -166,6 +166,7 @@ Koinly includes local helper scripts for repeatable validation and clean ZIP han
 - Phase 13 continued the split by moving reusable icon lookup/rendering helpers out of `lib\main.dart`.
 - Phase 14 fixed clean ZIP path separators so GitHub Actions workflow files upload as real `.github/workflows` files.
 - Phase 15 fixed Flutter SDK name collisions by hiding framework `Category`/`Summary` annotations from `lib\main.dart` imports.
+- Phase 17 hardened `/v1/sync/replace` so duplicate snapshot upserts and repeated operation IDs no longer cause Worker 500 responses.
 
 ---
 
@@ -199,6 +200,7 @@ Added for the current app:
 - Phase 13 source split with `lib/icon_helpers.dart`
 - Phase 14 GitHub/ForgePort ZIP path separator fix for automated Actions workflow detection
 - Phase 15 Flutter 3.47 `Category`/`Summary` import collision fix for Android release builds
+- Phase 17 Cloudflare Worker `/v1/sync/replace` duplicate-upsert/idempotency fix
 - onboarding login/create-account actions
 - onboarding skip-accounts flow that removes untouched starter accounts
 - Hidden Settings naming

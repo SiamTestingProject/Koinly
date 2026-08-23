@@ -140,6 +140,13 @@ export default {
     } catch (error) {
       const statusCode = error instanceof HttpError ? error.status : 500;
       const message = error instanceof HttpError ? error.message : 'Internal server error.';
+      if (!(error instanceof HttpError)) {
+        console.error('Unhandled sync worker error', {
+          path: url.pathname,
+          method: request.method,
+          error: databaseErrorMessage(error),
+        });
+      }
       return json({ error: message }, statusCode);
     } finally {
       db?.close();
@@ -359,7 +366,13 @@ async function replaceAll(request: Request, env: Env, db: Client, auth: AuthCont
   const maxBatch = Math.max(numberEnv(env.MAX_SYNC_BATCH_SIZE, 100), 1000);
   if (rawOperations.length > maxBatch) throw new HttpError(413, `Replace limit is ${maxBatch} operations.`);
 
-  const operations = rawOperations.map(validateOperation).filter(op => op.operation === 'upsert');
+  const latestUpsertByEntity = new Map<string, SyncOperation>();
+  for (const raw of rawOperations) {
+    const op = validateOperation(raw);
+    if (op.operation !== 'upsert') continue;
+    latestUpsertByEntity.set(`${op.entityType}\u0000${op.entityId}`, op);
+  }
+  const operations = [...latestUpsertByEntity.values()];
   const now = Date.now();
   const resetOperationId = crypto.randomUUID();
   const accepted: Array<{ operationId: string; entityType: string; entityId: string; sequence: number; version: number }> = [];
@@ -375,7 +388,11 @@ async function replaceAll(request: Request, env: Env, db: Client, auth: AuthCont
     args: [auth.userId, resetOperationId],
   })).rows[0];
   await db.execute({
-    sql: 'INSERT INTO processed_operations(user_id, operation_id, sequence, created_at) VALUES (?, ?, ?, ?)',
+    sql: `INSERT INTO processed_operations(user_id, operation_id, sequence, created_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(user_id, operation_id) DO UPDATE SET
+            sequence = excluded.sequence,
+            created_at = excluded.created_at`,
     args: [auth.userId, resetOperationId, Number(resetSequenceRow?.sequence ?? 0), now],
   });
 
@@ -385,7 +402,13 @@ async function replaceAll(request: Request, env: Env, db: Client, auth: AuthCont
     await db.batch([
       {
         sql: `INSERT INTO sync_entities(user_id, entity_type, entity_id, version, payload_json, deleted_at, updated_at, last_operation_id)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(user_id, entity_type, entity_id) DO UPDATE SET
+                version = excluded.version,
+                payload_json = excluded.payload_json,
+                deleted_at = excluded.deleted_at,
+                updated_at = excluded.updated_at,
+                last_operation_id = excluded.last_operation_id`,
         args: [auth.userId, op.entityType, op.entityId, version, payloadJson, null, now, op.operationId],
       },
       {
@@ -400,7 +423,11 @@ async function replaceAll(request: Request, env: Env, db: Client, auth: AuthCont
     })).rows[0];
     const sequence = Number(sequenceRow?.sequence ?? 0);
     await db.execute({
-      sql: 'INSERT INTO processed_operations(user_id, operation_id, sequence, created_at) VALUES (?, ?, ?, ?)',
+      sql: `INSERT INTO processed_operations(user_id, operation_id, sequence, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, operation_id) DO UPDATE SET
+              sequence = excluded.sequence,
+              created_at = excluded.created_at`,
       args: [auth.userId, op.operationId, sequence, now],
     });
     accepted.push({ operationId: op.operationId, entityType: op.entityType, entityId: op.entityId, sequence, version });

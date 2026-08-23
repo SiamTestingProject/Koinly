@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Hardened the Cloudflare Worker `/v1/sync/replace` endpoint so duplicate snapshot upserts are coalesced by entity before writing to Turso.
+- Made replace-sync processed operation writes idempotent, preventing repeated operation IDs from turning cloud overwrite attempts into 500 responses.
+- Added sanitized Worker-side logging for unexpected internal errors so future Cloudflare logs show the useful failure reason.
 - Fixed Android release builds on newer Flutter SDKs by hiding Flutter's `Category` and `Summary` annotation exports where they collided with Koinly finance models.
 - Fixed clean ZIP packaging on Windows so entries use GitHub-compatible `/` paths instead of literal backslash filenames.
 - Ensured workflow files package as `.github/workflows/*.yml`, allowing GitHub Actions to detect them after upload.
