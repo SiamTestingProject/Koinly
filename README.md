@@ -107,6 +107,7 @@ Release notes come from `CHANGELOG.md`. The workflow first looks for the current
 - Money formatting reuses cached formatters instead of creating a new formatter for every visible amount.
 - Home dashboard category totals reuse the already-filtered transaction list.
 - Background online sync uses incremental pulls and avoids global busy-state rebuilds; manual sync/sign-in can still fully overwrite local finance data when required.
+- Full restored-data uploads use a longer request timeout than small incremental syncs, and the Account & sync page now reports an existing background sync instead of making a manual tap look ignored.
 - Small icon images use medium filtering to reduce GPU work while scrolling.
 - Page transitions now use shorter fade-only motion, and the heavy background glow layers were removed to reduce animation jank on both Windows and Android.
 - Advanced settings includes Performance mode. It is enabled by default on desktop and reduces page transitions, press animations, animated card changes, update-wave animation, gradients, and heavy shadows.
@@ -318,6 +319,9 @@ Account & sync separates destructive and non-destructive actions:
   local finance data on this device after confirmation.
 - **Upload local changes** pushes pending local edits and then checks cloud
   changes.
+- When a local backup restore is waiting to become the cloud source of truth,
+  this button changes to **Upload restored data** and retries the full cloud
+  replacement upload.
 
 Sync status uses explicit stages such as checking local changes, downloading
 cloud copy, overwriting local data, applying cloud changes, synced, pending,

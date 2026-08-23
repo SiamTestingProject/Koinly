@@ -1403,6 +1403,8 @@ class AppController extends ChangeNotifier {
   final GithubUpdateService updateService = GithubUpdateService();
   UpdateCheckOutcome updateCheckOutcome = UpdateCheckOutcome.noReleaseAvailable;
   bool updateCheckBusy = false;
+
+  bool get cloudSyncOperationBusy => _syncInProgress || cloudSyncBusy || syncAuthBusy;
   bool updateDownloadBusy = false;
   String updateStatusMessage = 'Not checked yet.';
   DateTime? updateLastCheckedAt;
@@ -2404,7 +2406,20 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> performMultiDeviceSync({bool silent = false, bool pushLocalChanges = true}) async {
-    if (_syncInProgress || cloudSyncBusy || !_hasConfiguredSyncTarget()) return;
+    if (!_hasConfiguredSyncTarget()) {
+      if (!silent) {
+        syncStatus = 'Sign in to sync first.';
+        notifyListeners();
+      }
+      return;
+    }
+    if (_syncInProgress || cloudSyncBusy) {
+      if (!silent) {
+        syncStatus = 'Sync already running...';
+        notifyListeners();
+      }
+      return;
+    }
     _syncInProgress = true;
     cloudSyncBusy = !silent;
     if (!silent) {
@@ -2545,9 +2560,16 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> uploadAuthoritativeCloudData({bool silent = false}) async {
-    if (_syncInProgress || cloudSyncBusy || !_hasConfiguredSyncTarget()) {
-      if (!_hasConfiguredSyncTarget()) {
+    if (!_hasConfiguredSyncTarget()) {
+      if (!silent) {
         syncStatus = 'Restore complete • Sign in to upload restored data';
+        notifyListeners();
+      }
+      return;
+    }
+    if (_syncInProgress || cloudSyncBusy) {
+      if (!silent) {
+        syncStatus = 'Upload already running...';
         notifyListeners();
       }
       return;
@@ -2675,6 +2697,10 @@ class AppController extends ChangeNotifier {
 
   String _cleanSyncError(Object error) {
     final text = error.toString().replaceFirst('Exception: ', '').replaceFirst('Bad state: ', '').trim();
+    final lower = text.toLowerCase();
+    if (error is TimeoutException || lower.contains('timeoutexception') || lower.contains('future not completed')) {
+      return 'Upload timed out. Keep Koinly open on a stronger connection and try again.';
+    }
     final redacted = redactSyncSecrets(text);
     return redacted.isEmpty ? 'Sync failed. Check your database configuration.' : redacted;
   }
@@ -12458,16 +12484,24 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
 
   Future<void> _uploadPendingChanges() async {
     final state = context.read<AppController>();
+    if (state.cloudSyncOperationBusy) {
+      showSnack(context, 'Sync is already running. Please wait a moment.');
+      return;
+    }
     await state.syncToCloud();
     if (!mounted) return;
-    showSnack(context, state.cloudSyncError == null ? 'Local changes uploaded and cloud changes checked.' : state.cloudSyncError!);
+    final successMessage = state.authoritativeCloudUploadPending
+        ? 'Restored data upload is still pending. Try again when your connection is stronger.'
+        : 'Local changes uploaded and cloud changes checked.';
+    showSnack(context, state.cloudSyncError == null ? successMessage : state.cloudSyncError!);
   }
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppController>();
     final signedIn = state.cloudSyncEnabled && state.syncAccountEmail.isNotEmpty;
-    final busy = state.cloudSyncBusy || state.syncAuthBusy;
+    final busy = state.cloudSyncOperationBusy;
+    final uploadButtonLabel = state.authoritativeCloudUploadPending ? 'Upload restored data' : 'Upload local changes';
     final backendConfigured = CloudSyncService.configuredApiBaseUrl.trim().isNotEmpty;
     return PageScaffold(
       title: 'Account & sync',
@@ -12559,7 +12593,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                   OutlinedButton.icon(
                     onPressed: busy ? null : _uploadPendingChanges,
                     icon: const Icon(Icons.cloud_upload_rounded),
-                    label: const Text('Upload local changes'),
+                    label: Text(uploadButtonLabel),
                   ),
                   OutlinedButton.icon(
                     onPressed: busy ? null : () => state.logoutSyncAccount(),

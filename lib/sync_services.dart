@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -177,7 +178,7 @@ class KoinlySyncApi {
   }
 
   Future<Map<String, dynamic>> replaceAll({required String accessToken, required List<Map<String, dynamic>> operations}) {
-    return _post('/v1/sync/replace', {'operations': operations}, accessToken: accessToken);
+    return _post('/v1/sync/replace', {'operations': operations}, accessToken: accessToken, timeout: const Duration(minutes: 2));
   }
 
   Future<Map<String, dynamic>> pull({required String accessToken, required int cursor, int limit = 100}) {
@@ -189,31 +190,48 @@ class KoinlySyncApi {
   }
 
   Future<Map<String, dynamic>> _get(String path, {String? accessToken, Map<String, String>? query}) async {
-    final response = await http
-        .get(
-          _uri(path, query),
-          headers: {
-            'accept': 'application/json',
-            if (accessToken != null && accessToken.isNotEmpty) 'authorization': 'Bearer $accessToken',
-          },
-        )
-        .timeout(const Duration(seconds: 25));
-    return _decodeResponse(response);
+    try {
+      final response = await http
+          .get(
+            _uri(path, query),
+            headers: {
+              'accept': 'application/json',
+              if (accessToken != null && accessToken.isNotEmpty) 'authorization': 'Bearer $accessToken',
+            },
+          )
+          .timeout(const Duration(seconds: 25));
+      return _decodeResponse(response);
+    } on TimeoutException {
+      throw const CloudSyncException('Sync request timed out. Check your connection and try again.');
+    } on SocketException {
+      throw const CloudSyncException('No internet connection. Check your network and try again.');
+    }
   }
 
-  Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> body, {String? accessToken}) async {
-    final response = await http
-        .post(
-          _uri(path),
-          headers: {
-            'content-type': 'application/json',
-            'accept': 'application/json',
-            if (accessToken != null && accessToken.isNotEmpty) 'authorization': 'Bearer $accessToken',
-          },
-          body: jsonEncode(body),
-        )
-        .timeout(const Duration(seconds: 30));
-    return _decodeResponse(response);
+  Future<Map<String, dynamic>> _post(
+    String path,
+    Map<String, dynamic> body, {
+    String? accessToken,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    try {
+      final response = await http
+          .post(
+            _uri(path),
+            headers: {
+              'content-type': 'application/json',
+              'accept': 'application/json',
+              if (accessToken != null && accessToken.isNotEmpty) 'authorization': 'Bearer $accessToken',
+            },
+            body: jsonEncode(body),
+          )
+          .timeout(timeout);
+      return _decodeResponse(response);
+    } on TimeoutException {
+      throw const CloudSyncException('Upload timed out. Keep Koinly open on a stronger connection and try again.');
+    } on SocketException {
+      throw const CloudSyncException('No internet connection. Check your network and try again.');
+    }
   }
 
   Map<String, dynamic> _decodeResponse(http.Response response) {
