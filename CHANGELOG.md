@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed Android release builds on newer Flutter SDKs by hiding Flutter's `Category` and `Summary` annotation exports where they collided with Koinly finance models.
 - Fixed clean ZIP packaging on Windows so entries use GitHub-compatible `/` paths instead of literal backslash filenames.
 - Ensured workflow files package as `.github/workflows/*.yml`, allowing GitHub Actions to detect them after upload.
 - Continued Phase 13 source-structure cleanup by extracting shared icon lookup/rendering helpers into `lib/icon_helpers.dart`.
