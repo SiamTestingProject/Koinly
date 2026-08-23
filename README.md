@@ -87,7 +87,7 @@ Expected release assets:
 - `Koinly-v<version>.aab`
 - `Koinly-v<version>-Setup.exe`
 
-Release notes come from `CHANGELOG.md`. The workflow first looks for the current version section, then falls back to `## Unreleased`, so stable releases still publish meaningful notes instead of a generic one-line body.
+Release notes come from `CHANGELOG.md`. The workflow first looks for the current version section, then falls back to only the top current-update notes in `## Unreleased` and stops before `### Previous development history`. This keeps the in-app Latest release changelog focused on what was changed, added, removed, or fixed in that release only.
 
 ---
 

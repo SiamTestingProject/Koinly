@@ -13,6 +13,7 @@ on:
       - "assets/**"
       - "pubspec.yaml"
       - "pubspec.lock"
+      - "CHANGELOG.md"
       - ".github/workflows/build-android-apks.yml"
 
 concurrency:
@@ -540,27 +541,40 @@ jobs:
           VERSION_NAME="1.0.${BUILD_NUMBER}"
           RELEASE_TAG="v${VERSION_NAME}"
           RELEASE_TITLE="Koinly Stable ${VERSION_NAME}"
+
+          # Prefer a real version section when it exists. For automatic CI
+          # versions, fall back to the current top Unreleased notes only and
+          # stop before the archived "Previous development history" section.
           awk -v version="${VERSION_NAME}" '
             BEGIN { capture=0; found=0 }
             /^##[[:space:]]+\[?v?[0-9]+\.[0-9]+\.[0-9]+\]?/ {
               if (capture) exit
               if ($0 ~ version) { capture=1; found=1; next }
             }
-            /^##[[:space:]]+Unreleased/ {
-              if (capture) exit
-              if (!found) { capture=1; next }
-            }
             /^##[[:space:]]+/ && capture { exit }
             capture { print }
           ' CHANGELOG.md > release-notes-body.md
+
           if [ ! -s release-notes-body.md ]; then
-            awk 'BEGIN { capture=0 } /^##[[:space:]]+/ { if (capture) exit; capture=1; next } capture { print }' CHANGELOG.md > release-notes-body.md
+            awk '
+              BEGIN { capture=0 }
+              /^##[[:space:]]+Unreleased/ { capture=1; next }
+              /^##[[:space:]]+/ && capture { exit }
+              /^###[[:space:]]+Previous development history/ && capture { exit }
+              capture { print }
+            ' CHANGELOG.md > release-notes-body.md
           fi
-          {
-            echo "Stable Koinly ${VERSION_NAME} release built from commit ${GITHUB_SHA}."
-            echo
-            cat release-notes-body.md
-          } > release-notes.md
+
+          awk 'NF { seen=1 } seen { print }' release-notes-body.md > release-notes-trimmed.md
+          mv release-notes-trimmed.md release-notes-body.md
+          if [ ! -s release-notes-body.md ]; then
+            {
+              echo "### Changed"
+              echo
+              echo "- Stable Koinly ${VERSION_NAME} maintenance update."
+            } > release-notes-body.md
+          fi
+          cp release-notes-body.md release-notes.md
 
           if ! git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
             git tag "${RELEASE_TAG}" "$GITHUB_SHA"

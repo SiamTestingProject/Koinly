@@ -2,9 +2,19 @@
 
 ## Unreleased
 
+### Fixed
+
+- Latest release changelog now publishes only the current update notes instead of the full accumulated development history.
 - Made Account & sync uploads more reliable by giving full restore uploads a longer request timeout and replacing raw timeout exceptions with clean user-facing messages.
 - Prevented Upload restored/local changes from appearing to do nothing while a background sync retry is already running.
+
+### Changed
+
+- Release notes are grouped by current changes, additions, removals, and fixes so the in-app updater shows only the useful “what changed in this update” text.
 - Renamed the Account & sync upload button to “Upload restored data” whenever a restored local backup still needs to become the cloud source of truth.
+
+### Previous development history
+
 - Hid the Account & sync backend-configuration explanation card and the restore/upload help paragraph to keep the sync page cleaner.
 - Reduced Cloudflare Worker subrequests during `/v1/sync/replace` by batching snapshot entity/change writes instead of calling Turso several times per entity.
 - Removed per-operation sequence lookups from authoritative cloud replace uploads; the app only needs accepted entity versions plus the final server cursor for this flow.
