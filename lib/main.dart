@@ -1394,6 +1394,8 @@ class AppController extends ChangeNotifier {
   bool _syncInProgress = false;
   Timer? _cloudSyncDebounce;
   Timer? _cloudSyncRetryTimer;
+  Timer? _cloudSyncAutoPullTimer;
+  DateTime? _lastCloudAutoPullAt;
   String syncAccountEmail = '';
   String syncAccessToken = '';
   String syncRefreshToken = '';
@@ -1460,6 +1462,7 @@ class AppController extends ChangeNotifier {
     } catch (_) {}
     if (_hasConfiguredSyncTarget()) {
       _schedulePendingSyncRetry(immediate: true);
+      _startCloudAutoPull();
     }
   }
 
@@ -1542,7 +1545,9 @@ class AppController extends ChangeNotifier {
     pendingAndroidUpdateVersion = await prefs.getString('pendingAndroidUpdateVersion', '');
     final pendingKindName = await prefs.getString('pendingAndroidUpdateKind', '');
     pendingAndroidUpdateKind = pendingKindName.isEmpty ? null : enumByName(UpdateAssetKind.values, pendingKindName, UpdateAssetKind.arm64);
-    if (pendingAndroidUpdatePath.isNotEmpty && !await File(pendingAndroidUpdatePath).exists()) {
+    if (pendingAndroidUpdatePath.isNotEmpty && _isPendingAndroidUpdateAlreadyInstalled()) {
+      await _clearPendingAndroidUpdate(deleteFile: true);
+    } else if (pendingAndroidUpdatePath.isNotEmpty && !await File(pendingAndroidUpdatePath).exists()) {
       await _clearPendingAndroidUpdate();
     }
     lastSafetyBackupPath = await prefs.getString('lastSafetyBackupPath', '');
@@ -1863,7 +1868,7 @@ class AppController extends ChangeNotifier {
   bool get cloudSyncApprovalRequired => cloudSyncErrorCode == 'SYNC_APPROVAL_REQUIRED';
 
   bool get hasAvailableUpdate => updateCheckOutcome == UpdateCheckOutcome.updateAvailable && latestGithubRelease != null;
-  bool get hasPendingAndroidUpdate => pendingAndroidUpdatePath.isNotEmpty && pendingAndroidUpdateVersion.isNotEmpty;
+  bool get hasPendingAndroidUpdate => pendingAndroidUpdatePath.isNotEmpty && pendingAndroidUpdateVersion.isNotEmpty && !_isPendingAndroidUpdateAlreadyInstalled();
 
   Map<UpdateAssetKind, ReleaseAsset> get availableAndroidUpdateAssets {
     final release = latestGithubRelease;
@@ -1914,6 +1919,8 @@ class AppController extends ChangeNotifier {
         await _clearPendingAndroidUpdate(deleteFile: true);
         await UpdateDownloadStore.cleanupStaleAndroidUpdates(keepVersion: result.release!.displayVersion);
       }
+    } else if (Platform.isAndroid && _isPendingAndroidUpdateAlreadyInstalled()) {
+      await _clearPendingAndroidUpdate(deleteFile: true);
     }
     notifyListeners();
     return result;
@@ -2051,6 +2058,12 @@ class AppController extends ChangeNotifier {
 
   Future<void> installPendingAndroidUpdate() async {
     if (!Platform.isAndroid) return;
+    if (_isPendingAndroidUpdateAlreadyInstalled()) {
+      await _clearPendingAndroidUpdate(deleteFile: true);
+      updateStatusMessage = 'Koinly is already updated.';
+      notifyListeners();
+      return;
+    }
     if (pendingAndroidUpdatePath.isEmpty || !await File(pendingAndroidUpdatePath).exists()) {
       await _clearPendingAndroidUpdate();
       updateStatusMessage = 'Downloaded update was not found. Please download it again.';
@@ -2076,6 +2089,12 @@ class AppController extends ChangeNotifier {
 
   Future<void> resumePendingAndroidInstallIfAllowed() async {
     if (!Platform.isAndroid || pendingAndroidUpdatePath.isEmpty || updateDownloadBusy) return;
+    if (_isPendingAndroidUpdateAlreadyInstalled()) {
+      await _clearPendingAndroidUpdate(deleteFile: true);
+      updateStatusMessage = 'Koinly is already updated.';
+      notifyListeners();
+      return;
+    }
     try {
       if (await AndroidUpdateInstaller.canInstallPackages()) {
         await installPendingAndroidUpdate();
@@ -2111,6 +2130,14 @@ class AppController extends ChangeNotifier {
     await prefs.setString('pendingAndroidUpdatePath', path);
     await prefs.setString('pendingAndroidUpdateVersion', version);
     await prefs.setString('pendingAndroidUpdateKind', enumName(kind));
+  }
+
+  bool _isPendingAndroidUpdateAlreadyInstalled() {
+    if (pendingAndroidUpdateVersion.trim().isEmpty) return false;
+    final installed = SemanticVersion.tryParse(appVersion);
+    final pending = SemanticVersion.tryParse(pendingAndroidUpdateVersion);
+    if (installed == null || pending == null) return false;
+    return pending.compareTo(installed) <= 0;
   }
 
   Future<void> _clearPendingAndroidUpdate({bool deleteFile = false}) async {
@@ -2321,11 +2348,11 @@ class AppController extends ChangeNotifier {
     await _authenticateSyncAccount(register: true, email: email, password: password);
   }
 
-  Future<void> loginSyncAccount({required String email, required String password, bool preferCloudData = false}) async {
+  Future<void> loginSyncAccount({required String email, required String password, bool preferCloudData = true}) async {
     await _authenticateSyncAccount(register: false, email: email, password: password, preferCloudData: preferCloudData);
   }
 
-  Future<void> _authenticateSyncAccount({required bool register, required String email, required String password, bool preferCloudData = false}) async {
+  Future<void> _authenticateSyncAccount({required bool register, required String email, required String password, bool preferCloudData = true}) async {
     syncAuthBusy = true;
     cloudSyncError = null;
     syncStatus = register ? 'Creating account...' : 'Signing in...';
@@ -2354,6 +2381,7 @@ class AppController extends ChangeNotifier {
         }
         await performMultiDeviceSync(silent: !preferCloudData, pushLocalChanges: false);
       }
+      _startCloudAutoPull();
     } catch (error) {
       cloudSyncError = _cleanSyncError(error);
       syncStatus = 'Sync error';
@@ -2381,6 +2409,7 @@ class AppController extends ChangeNotifier {
     syncStatus = 'Offline';
     await prefs.setString('syncAccountEmail', '');
     await prefs.setBool('cloudSyncEnabled', false);
+    _stopCloudAutoPull();
     syncAuthBusy = false;
     notifyListeners();
   }
@@ -2685,8 +2714,35 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  void _startCloudAutoPull() {
+    if (!_hasConfiguredSyncTarget()) {
+      _stopCloudAutoPull();
+      return;
+    }
+    _cloudSyncAutoPullTimer ??= Timer.periodic(const Duration(seconds: 15), (_) {
+      unawaited(syncCloudChangesIfIdle());
+    });
+    unawaited(syncCloudChangesIfIdle(force: true));
+  }
+
+  void _stopCloudAutoPull() {
+    _cloudSyncAutoPullTimer?.cancel();
+    _cloudSyncAutoPullTimer = null;
+    _lastCloudAutoPullAt = null;
+  }
+
+  Future<void> syncCloudChangesIfIdle({bool force = false}) async {
+    if (!_hasConfiguredSyncTarget() || syncAuthBusy || updateDownloadBusy) return;
+    if (_syncInProgress || cloudSyncBusy) return;
+    final now = DateTime.now();
+    if (!force && _lastCloudAutoPullAt != null && now.difference(_lastCloudAutoPullAt!) < const Duration(seconds: 12)) return;
+    _lastCloudAutoPullAt = now;
+    await syncToCloud(silent: true);
+  }
+
   void queueCloudSync() {
     if (!_hasConfiguredSyncTarget()) return;
+    _startCloudAutoPull();
     unawaited(_setCloudSyncPending(true));
     _schedulePendingSyncRetry();
     _cloudSyncDebounce?.cancel();
@@ -2709,6 +2765,7 @@ class AppController extends ChangeNotifier {
   void dispose() {
     _cloudSyncDebounce?.cancel();
     _cloudSyncRetryTimer?.cancel();
+    _cloudSyncAutoPullTimer?.cancel();
     _updateDownloadClient?.close();
     updateService.close();
     super.dispose();
@@ -3907,7 +3964,9 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      unawaited(context.read<AppController>().resumePendingAndroidInstallIfAllowed());
+      final controller = context.read<AppController>();
+      unawaited(controller.resumePendingAndroidInstallIfAllowed());
+      unawaited(controller.syncCloudChangesIfIdle(force: true));
     }
   }
 
@@ -12402,7 +12461,7 @@ class MultiDeviceSyncScreen extends StatefulWidget {
     this.completeOnAuth = false,
     this.returnOnAuth = false,
     this.initialRegisterMode = false,
-    this.preferCloudDataOnAuth = false,
+    this.preferCloudDataOnAuth = true,
   });
 
   final bool completeOnAuth;
@@ -12578,6 +12637,13 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                 _registerMode ? 'Create your Koinly sync account' : 'Login to your Koinly sync account',
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
               ),
+              if (!_registerMode) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Login downloads your cloud copy and completely replaces local finance data on this device.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
+                ),
+              ],
               const SizedBox(height: 10),
             ],
             if (signedIn)

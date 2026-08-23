@@ -4,12 +4,15 @@
 
 ### Fixed
 
+- Other signed-in devices now automatically pull cloud changes while the app is open and whenever the app resumes, so new transactions appear across devices without manual restore.
+- Android no longer reopens the package installer for a downloaded update after that same version is already installed.
 - Latest release changelog now publishes only the current update notes instead of the full accumulated development history.
 - Made Account & sync uploads more reliable by giving full restore uploads a longer request timeout and replacing raw timeout exceptions with clean user-facing messages.
 - Prevented Upload restored/local changes from appearing to do nothing while a background sync retry is already running.
 
 ### Changed
 
+- Login from setup or Account & sync now always treats cloud data as the source of truth and fully replaces local finance data on the device.
 - Release notes are grouped by current changes, additions, removals, and fixes so the in-app updater shows only the useful “what changed in this update” text.
 - Renamed the Account & sync upload button to “Upload restored data” whenever a restored local backup still needs to become the cloud source of truth.
 

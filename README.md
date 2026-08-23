@@ -108,6 +108,7 @@ Release notes come from `CHANGELOG.md`. The workflow first looks for the current
 - Home dashboard category totals reuse the already-filtered transaction list.
 - Background online sync uses incremental pulls and avoids global busy-state rebuilds; manual sync/sign-in can still fully overwrite local finance data when required.
 - Full restored-data uploads use a longer request timeout than small incremental syncs, and the Account & sync page now reports an existing background sync instead of making a manual tap look ignored.
+- Signed-in devices automatically run a quiet foreground sync every 15 seconds and once on app resume, so changes made on one device are pulled by other open devices without using Restore cloud copy.
 - Small icon images use medium filtering to reduce GPU work while scrolling.
 - Page transitions now use shorter fade-only motion, and the heavy background glow layers were removed to reduce animation jank on both Windows and Android.
 - Advanced settings includes Performance mode. It is enabled by default on desktop and reduces page transitions, press animations, animated card changes, update-wave animation, gradients, and heavy shadows.
@@ -296,11 +297,11 @@ The active user flow is:
 3. Create an account or sign in.
 4. Continue using Koinly normally.
 
-During first setup, Login signs in, downloads the cloud copy as the source of
-truth, overwrites local setup/default finance data, completes setup, and opens
-the app. Create account still returns to the setup pages after authentication
-so a new user can finish local setup before adopting the device data into the
-new cloud account.
+Login always signs in, downloads the cloud copy as the source of truth, creates
+a safety backup, and fully overwrites local finance data on that device. During
+first setup, login also completes setup and opens the app. Create account still
+returns to the setup pages after authentication so a new user can finish local
+setup before adopting the device data into the new cloud account.
 
 The Accounts setup page can also be skipped for fully empty local use. Skipping
 accounts removes the untouched Cash, Card, and Bank Account placeholders, saves
@@ -690,10 +691,11 @@ The old `backend/cloudflare-turso/` snapshot/admin-approval backend is retained 
 1. User opens Account & sync.
 2. The app uses the Worker URL embedded at build time through `KOINLY_SYNC_API_BASE_URL`.
 3. User creates an account or signs in.
-4. Existing local data is adopted into the account through the outbox.
-5. Local changes are saved immediately and synced automatically in the background.
-6. Other signed-in devices pull changes by cursor and update their local SQLite database.
-7. A manual Sync now action remains available for troubleshooting.
+4. Create account adopts existing local data into the new account through the outbox.
+5. Login clears local finance data and replaces it with the cloud account data.
+6. Local changes are saved immediately and synced automatically in the background.
+7. Other signed-in devices quietly sync every 15 seconds while open and once when the app resumes, pulling changes by cursor into local SQLite.
+8. A manual Sync now action remains available for troubleshooting.
 
 ---
 
