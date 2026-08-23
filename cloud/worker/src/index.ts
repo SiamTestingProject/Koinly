@@ -377,60 +377,43 @@ async function replaceAll(request: Request, env: Env, db: Client, auth: AuthCont
   const resetOperationId = crypto.randomUUID();
   const accepted: Array<{ operationId: string; entityType: string; entityId: string; sequence: number; version: number }> = [];
 
-  await db.execute({ sql: 'DELETE FROM sync_entities WHERE user_id = ?', args: [auth.userId] });
-  await db.execute({
-    sql: `INSERT INTO sync_changes(user_id, entity_type, entity_id, operation, version, payload_json, device_id, operation_id, changed_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [auth.userId, '__reset__', 'finance', 'delete', 0, null, auth.deviceId, resetOperationId, now],
-  });
-  const resetSequenceRow = (await db.execute({
-    sql: 'SELECT sequence FROM sync_changes WHERE user_id = ? AND operation_id = ?',
-    args: [auth.userId, resetOperationId],
-  })).rows[0];
-  await db.execute({
-    sql: `INSERT INTO processed_operations(user_id, operation_id, sequence, created_at)
-          VALUES (?, ?, ?, ?)
-          ON CONFLICT(user_id, operation_id) DO UPDATE SET
-            sequence = excluded.sequence,
-            created_at = excluded.created_at`,
-    args: [auth.userId, resetOperationId, Number(resetSequenceRow?.sequence ?? 0), now],
-  });
+  await db.batch([
+    { sql: 'DELETE FROM sync_entities WHERE user_id = ?', args: [auth.userId] },
+    {
+      sql: `INSERT INTO sync_changes(user_id, entity_type, entity_id, operation, version, payload_json, device_id, operation_id, changed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [auth.userId, '__reset__', 'finance', 'delete', 0, null, auth.deviceId, resetOperationId, now],
+    },
+  ], 'write');
 
-  for (const op of operations) {
-    const version = 1;
-    const payloadJson = JSON.stringify(op.payload ?? {});
-    await db.batch([
-      {
-        sql: `INSERT INTO sync_entities(user_id, entity_type, entity_id, version, payload_json, deleted_at, updated_at, last_operation_id)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(user_id, entity_type, entity_id) DO UPDATE SET
-                version = excluded.version,
-                payload_json = excluded.payload_json,
-                deleted_at = excluded.deleted_at,
-                updated_at = excluded.updated_at,
-                last_operation_id = excluded.last_operation_id`,
-        args: [auth.userId, op.entityType, op.entityId, version, payloadJson, null, now, op.operationId],
-      },
-      {
-        sql: `INSERT INTO sync_changes(user_id, entity_type, entity_id, operation, version, payload_json, device_id, operation_id, changed_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [auth.userId, op.entityType, op.entityId, 'upsert', version, payloadJson, auth.deviceId, op.operationId, now],
-      },
-    ], 'write');
-    const sequenceRow = (await db.execute({
-      sql: 'SELECT sequence FROM sync_changes WHERE user_id = ? AND operation_id = ?',
-      args: [auth.userId, op.operationId],
-    })).rows[0];
-    const sequence = Number(sequenceRow?.sequence ?? 0);
-    await db.execute({
-      sql: `INSERT INTO processed_operations(user_id, operation_id, sequence, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, operation_id) DO UPDATE SET
-              sequence = excluded.sequence,
-              created_at = excluded.created_at`,
-      args: [auth.userId, op.operationId, sequence, now],
-    });
-    accepted.push({ operationId: op.operationId, entityType: op.entityType, entityId: op.entityId, sequence, version });
+  const replaceChunkSize = 40;
+  for (let start = 0; start < operations.length; start += replaceChunkSize) {
+    const chunk = operations.slice(start, start + replaceChunkSize);
+    const statements = [];
+    for (const op of chunk) {
+      const version = 1;
+      const payloadJson = JSON.stringify(op.payload ?? {});
+      statements.push(
+        {
+          sql: `INSERT INTO sync_entities(user_id, entity_type, entity_id, version, payload_json, deleted_at, updated_at, last_operation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, entity_type, entity_id) DO UPDATE SET
+                  version = excluded.version,
+                  payload_json = excluded.payload_json,
+                  deleted_at = excluded.deleted_at,
+                  updated_at = excluded.updated_at,
+                  last_operation_id = excluded.last_operation_id`,
+          args: [auth.userId, op.entityType, op.entityId, version, payloadJson, null, now, op.operationId],
+        },
+        {
+          sql: `INSERT INTO sync_changes(user_id, entity_type, entity_id, operation, version, payload_json, device_id, operation_id, changed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [auth.userId, op.entityType, op.entityId, 'upsert', version, payloadJson, auth.deviceId, op.operationId, now],
+        },
+      );
+      accepted.push({ operationId: op.operationId, entityType: op.entityType, entityId: op.entityId, sequence: 0, version });
+    }
+    await db.batch(statements, 'write');
   }
 
   const cursor = await maxSequence(db, auth);

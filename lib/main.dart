@@ -12517,23 +12517,6 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            ExpressiveCard(
-              child: Row(
-                children: [
-                  Icon(backendConfigured ? Icons.verified_rounded : Icons.warning_rounded, color: backendConfigured ? kSleekIncome : kSleekExpense),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      backendConfigured
-                          ? 'Online sync backend is configured for this build.'
-                          : 'Online sync backend is missing. Set KOINLY_SYNC_API_BASE_URL in GitHub Actions and rebuild.',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
             TextField(
               controller: _emailController,
               enabled: !busy && !signedIn,
@@ -12604,11 +12587,6 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                   ),
                 ],
               ),
-            const SizedBox(height: 16),
-            Text(
-              'Restore cloud copy downloads the account cloud data and fully replaces local finance data on this device. Upload local changes pushes pending edits, then checks cloud changes. Local backup and restore remain separate safety tools.',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
-            ),
           ],
         ),
       ),
