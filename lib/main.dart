@@ -2504,6 +2504,7 @@ class AppController extends ChangeNotifier {
       }
 
       final replaceLocalData = !pushLocalChanges;
+      var needsStarterCleanupUpload = false;
       var cursor = replaceLocalData ? 0 : (int.tryParse(await database.readSyncState('serverCursor', '0')) ?? 0);
       var hasMore = true;
       final remoteChanges = <Map<String, dynamic>>[];
@@ -2540,11 +2541,19 @@ class AppController extends ChangeNotifier {
         }
         await database.applyRemoteChanges(remoteChanges, importPreferences);
       }
+      if (replaceLocalData) {
+        starterAccountsSkipped = true;
+        await prefs.setBool('starterAccountsSkipped', true);
+        if (await _removeSkippedStarterAccountsIfNeeded(force: true, allowMixedAccounts: true)) {
+          needsStarterCleanupUpload = true;
+        }
+      }
       await database.writeSyncState('serverCursor', '$cursor');
 
       cloudSyncLastAt = DateTime.now();
       await prefs.setString('cloudSyncLastAt', cloudSyncLastAt!.toIso8601String());
-      await _setCloudSyncPending(false);
+      await _setCloudSyncPending(needsStarterCleanupUpload);
+      if (needsStarterCleanupUpload) _schedulePendingSyncRetry();
       cloudSyncError = null;
       cloudSyncErrorCode = null;
       syncStatus = replaceLocalData ? 'Cloud copy restored' : 'Synced';
@@ -2771,8 +2780,8 @@ class AppController extends ChangeNotifier {
     super.dispose();
   }
 
-  Future<bool> _removeSkippedStarterAccountsIfNeeded() async {
-    var shouldRemoveStarterAccounts = starterAccountsSkipped;
+  Future<bool> _removeSkippedStarterAccountsIfNeeded({bool force = false, bool allowMixedAccounts = false}) async {
+    var shouldRemoveStarterAccounts = force || starterAccountsSkipped;
     if (!shouldRemoveStarterAccounts && onboardingCompleted && await database.hasOnlyUntouchedStarterAccounts()) {
       starterAccountsSkipped = true;
       shouldRemoveStarterAccounts = true;
@@ -2780,8 +2789,10 @@ class AppController extends ChangeNotifier {
     }
     if (!shouldRemoveStarterAccounts) return false;
 
-    final stillHasOnlyUntouchedStarterAccounts = await database.hasOnlyUntouchedStarterAccounts();
-    if (!stillHasOnlyUntouchedStarterAccounts) return false;
+    if (!allowMixedAccounts) {
+      final stillHasOnlyUntouchedStarterAccounts = await database.hasOnlyUntouchedStarterAccounts();
+      if (!stillHasOnlyUntouchedStarterAccounts) return false;
+    }
 
     final deletedStarterAccountIds = await database.deleteUntouchedStarterAccounts();
     for (final accountId in deletedStarterAccountIds) {
@@ -4516,7 +4527,7 @@ class ExpressiveCard extends StatelessWidget {
     final borderColor = dark ? Colors.white.withOpacity(.085) : scheme.outlineVariant.withOpacity(.74);
     final decoration = BoxDecoration(
       color: baseColor.withOpacity(dark ? .88 : 1),
-      gradient: surfaceTint && !reducedMotion
+      gradient: surfaceTint && !reducedMotion && !kIsDesktopApp
           ? LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
@@ -4529,28 +4540,23 @@ class ExpressiveCard extends StatelessWidget {
           : null,
       borderRadius: BorderRadius.circular(radius),
       border: Border.all(color: borderColor, width: 1),
-      boxShadow: reducedMotion
+      boxShadow: (reducedMotion || kIsDesktopApp)
           ? [
               if (!kIsDesktopApp) BoxShadow(color: Colors.black.withOpacity(dark ? .20 : .035), blurRadius: 10, offset: const Offset(0, 5)),
             ]
-          : kIsDesktopApp
-              ? [
-                  BoxShadow(color: Colors.black.withOpacity(dark ? .20 : .025), blurRadius: 24, offset: const Offset(0, 12)),
-                  if (dark) BoxShadow(color: kSleekAccent.withOpacity(.045), blurRadius: 28, offset: const Offset(0, 2)),
-                ]
-              : [
-                  if (dark)
-                    BoxShadow(color: Colors.black.withOpacity(.32), blurRadius: 22, offset: const Offset(0, 12))
-                  else
-                    BoxShadow(color: scheme.shadow.withOpacity(.060), blurRadius: 18, offset: const Offset(0, 9)),
-                  if (dark) BoxShadow(color: kSleekAccent.withOpacity(.06), blurRadius: 26, offset: const Offset(0, 4)),
-                ],
+          : [
+              if (dark)
+                BoxShadow(color: Colors.black.withOpacity(.32), blurRadius: 22, offset: const Offset(0, 12))
+              else
+                BoxShadow(color: scheme.shadow.withOpacity(.060), blurRadius: 18, offset: const Offset(0, 9)),
+              if (dark) BoxShadow(color: kSleekAccent.withOpacity(.06), blurRadius: 26, offset: const Offset(0, 4)),
+            ],
     );
     final cardChild = ClipRRect(
       borderRadius: BorderRadius.circular(radius),
       child: Padding(padding: padding, child: child),
     );
-    if (reducedMotion) {
+    if (reducedMotion || kIsDesktopApp) {
       return Container(decoration: decoration, child: cardChild);
     }
     return AnimatedContainer(

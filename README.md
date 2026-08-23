@@ -107,11 +107,13 @@ Release notes come from `CHANGELOG.md`. The workflow first looks for the current
 - Money formatting reuses cached formatters instead of creating a new formatter for every visible amount.
 - Home dashboard category totals reuse the already-filtered transaction list.
 - Background online sync uses incremental pulls and avoids global busy-state rebuilds; manual sync/sign-in can still fully overwrite local finance data when required.
+- Login/cloud overwrite removes untouched starter Cash/Card/Bank Account placeholders after applying the cloud copy, so old seeded accounts do not survive sign-in.
 - Full restored-data uploads use a longer request timeout than small incremental syncs, and the Account & sync page now reports an existing background sync instead of making a manual tap look ignored.
 - Signed-in devices automatically run a quiet foreground sync every 15 seconds and once on app resume, so changes made on one device are pulled by other open devices without using Restore cloud copy.
 - Small icon images use medium filtering to reduce GPU work while scrolling.
 - Page transitions now use shorter fade-only motion, and the heavy background glow layers were removed to reduce animation jank on both Windows and Android.
 - Advanced settings includes Performance mode. It is enabled by default on desktop and reduces page transitions, press animations, animated card changes, update-wave animation, gradients, and heavy shadows.
+- Desktop card lists use static card containers with lighter visual effects so account/category/transaction scrolling has less GPU and layout work.
 - Desktop page headers are slightly more compact than mobile headers so Windows layouts feel less oversized.
 
 ---

@@ -130,7 +130,7 @@ class KoinlyScrollBehavior extends MaterialScrollBehavior {
 
   @override
   ScrollPhysics getScrollPhysics(BuildContext context) {
-    if (kIsDesktopApp) return const ClampingScrollPhysics();
+    if (kIsDesktopApp) return const RangeMaintainingScrollPhysics(parent: ClampingScrollPhysics());
     return const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics());
   }
 
@@ -141,6 +141,6 @@ class KoinlyScrollBehavior extends MaterialScrollBehavior {
 }
 
 ScrollPhysics optimizedScrollPhysics(BuildContext context) {
-  if (kIsDesktopApp) return const ClampingScrollPhysics();
+  if (kIsDesktopApp) return const RangeMaintainingScrollPhysics(parent: ClampingScrollPhysics());
   return const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics());
 }
