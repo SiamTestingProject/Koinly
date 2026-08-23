@@ -14,11 +14,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
-import 'package:mongo_dart/mongo_dart.dart' as mongo;
 import 'package:local_auth/local_auth.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -27,50 +24,24 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart' as sql;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart' as sqflite_ffi;
-import 'package:timezone/data/latest.dart' as tzdata;
-import 'package:timezone/timezone.dart' as tz;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
+import 'app_config.dart';
+import 'branding_widgets.dart';
+import 'collection_utils.dart';
+import 'icon_helpers.dart';
+import 'models.dart';
+import 'persistence_stores.dart';
+import 'reminder_service.dart';
+import 'sync_models.dart';
+import 'sync_services.dart';
+import 'ui_foundation.dart';
 import 'update_service.dart';
 
 const _uuid = Uuid();
-
-const Color kSleekBackground = Color(0xFF020B0F);
-const Color kSleekSurface = Color(0xFF07171D);
-const Color kSleekSurfaceHigh = Color(0xFF0C2028);
-const Color kSleekSurfaceHigher = Color(0xFF132B34);
-const Color kSleekAccent = Color(0xFF00D7E8);
-const Color kSleekIncome = Color(0xFF27D17F);
-const Color kSleekExpense = Color(0xFFFF5353);
-const Color kSleekWarning = Color(0xFFF59E0B);
-const Color kSleekMuted = Color(0xFF90A4AD);
-
-const appTitle = 'Koinly';
-const appVersion = String.fromEnvironment('KOINLY_APP_VERSION', defaultValue: '1.0.70');
-const backupPassword = 'YOUR_SECRET_PASSWORD';
-const kSyncAdminTelegramUrl = 'https://t.me/Ch0wdhury_Siam';
-final bool kLoansFeatureEnabled = bool.fromEnvironment('KOINLY_ENABLE_LOANS', defaultValue: false);
-
-const int kHomeTabIndex = 0;
-const int kAnalysisTabIndex = 1;
-int get kLoansTabIndex => 2;
-int get kTransactionTabIndex => kLoansFeatureEnabled ? 3 : 2;
-int get kCategoriesTabIndex => kLoansFeatureEnabled ? 4 : 3;
-
-bool get kUsesDesktopSqlite => !kIsWeb && (Platform.isWindows || Platform.isLinux);
-bool get kIsDesktopApp => !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
-bool get kSupportsLocalNotifications => !kIsWeb && Platform.isAndroid;
-
-// Desktop builds store SharedPreferences separately from Android. Older Windows
-// builds could inherit `onboardingCompleted=true` and skip the setup flow.
-// Bumping this desktop setup marker forces the setup pages to appear once on PC
-// without resetting mobile users or deleting any finance data. Revision 20260621 also
-// corrects installs that previously skipped the Windows setup flow.
-const int kRequiredDesktopSetupVersion = 20260623;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -103,812 +74,6 @@ Future<void> main() async {
       child: const KoinlyApp(),
     ),
   );
-}
-
-// -----------------------------------------------------------------------------
-// Models
-// -----------------------------------------------------------------------------
-
-enum AccountType { regular, credit, savings }
-enum CategoryType { income, expense }
-enum MoneyTransactionType { income, expense, transfer }
-enum LoanType { given, taken }
-enum LoanStatus { open, completed }
-enum DateRangeType { today, thisWeek, thisMonth, thisYear, allTime, custom }
-enum FinancialHealthPeriod { monthly, yearly }
-enum CurrencyPosition { prefix, suffix }
-enum ThemePreference { system, light, dark, batterySaver }
-enum SyncDatabaseProvider { turso, mongoDb, local, cloudflareD1, supabase, neonPostgres, firebaseFirestore }
-
-const List<SyncDatabaseProvider> userSyncDatabaseProviders = [
-  SyncDatabaseProvider.mongoDb,
-];
-
-String enumName(Object value) => value.toString().split('.').last;
-
-T enumByName<T>(Iterable<T> values, String? name, T fallback) {
-  if (name == null) return fallback;
-  for (final value in values) {
-    if (enumName(value as Object) == name) return value;
-  }
-  return fallback;
-}
-
-String syncDatabaseProviderLabel(SyncDatabaseProvider provider) {
-  switch (provider) {
-    case SyncDatabaseProvider.turso:
-      return 'Turso Database (hidden)';
-    case SyncDatabaseProvider.mongoDb:
-      return 'MongoDB Database';
-    case SyncDatabaseProvider.local:
-      return 'Local Database';
-    case SyncDatabaseProvider.cloudflareD1:
-      return 'Cloudflare D1';
-    case SyncDatabaseProvider.supabase:
-      return 'Supabase Postgres';
-    case SyncDatabaseProvider.neonPostgres:
-      return 'Neon Postgres';
-    case SyncDatabaseProvider.firebaseFirestore:
-      return 'Firebase Firestore';
-  }
-}
-
-IconData syncDatabaseProviderIcon(SyncDatabaseProvider provider) {
-  switch (provider) {
-    case SyncDatabaseProvider.turso:
-      return Icons.block_rounded;
-    case SyncDatabaseProvider.mongoDb:
-      return Icons.storage_rounded;
-    case SyncDatabaseProvider.local:
-      return Icons.phone_android_rounded;
-    case SyncDatabaseProvider.cloudflareD1:
-      return Icons.cloud_queue_rounded;
-    case SyncDatabaseProvider.supabase:
-      return Icons.account_tree_rounded;
-    case SyncDatabaseProvider.neonPostgres:
-      return Icons.auto_awesome_rounded;
-    case SyncDatabaseProvider.firebaseFirestore:
-      return Icons.local_fire_department_rounded;
-  }
-}
-
-String syncDatabaseProviderSubtitle(SyncDatabaseProvider provider) {
-  switch (provider) {
-    case SyncDatabaseProvider.turso:
-      return 'Hidden for users until Turso sync is ready again.';
-    case SyncDatabaseProvider.mongoDb:
-      return 'Use a MongoDB URL to store app sync snapshots.';
-    case SyncDatabaseProvider.local:
-      return 'Keep data on this device only. No cloud credentials required.';
-    case SyncDatabaseProvider.cloudflareD1:
-      return 'Free Cloudflare database option through your Koinly Worker API.';
-    case SyncDatabaseProvider.supabase:
-      return 'Free Supabase Postgres option through your Koinly Worker API.';
-    case SyncDatabaseProvider.neonPostgres:
-      return 'Free Neon Postgres option through your Koinly Worker API.';
-    case SyncDatabaseProvider.firebaseFirestore:
-      return 'Free Firebase Firestore option through your Koinly Worker API.';
-  }
-}
-
-String redactSyncSecrets(String value) {
-  return value
-      .replaceAll(RegExp(r'mongodb(\+srv)?:\/\/[^\s\)\]\}]+', caseSensitive: false), 'mongodb://••••')
-      .replaceAll(RegExp(r'Bearer\s+[A-Za-z0-9._~+\/=-]+', caseSensitive: false), 'Bearer ••••')
-      .replaceAllMapped(RegExp(r'(token|password|auth)[=:]\s*[^,;\s]+', caseSensitive: false), (match) => '${match.group(1)}=••••');
-}
-
-
-DateTime dateFromDb(Object? value) {
-  if (value == null) return DateTime.now();
-  if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
-  if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
-  return DateTime.now();
-}
-
-int dateToDb(DateTime value) => value.millisecondsSinceEpoch;
-
-Color colorFromHex(String value, {Color fallback = const Color(0xFF78D8E8)}) {
-  final cleaned = value.replaceAll('#', '').trim();
-  if (cleaned.isEmpty) return fallback;
-  final normalized = cleaned.length == 6 ? 'FF$cleaned' : cleaned;
-  return Color(int.tryParse(normalized, radix: 16) ?? fallback.value);
-}
-
-String colorToHex(Color color) => '#${color.value.toRadixString(16).padLeft(8, '0').substring(2)}';
-
-class Account {
-  Account({
-    required this.id,
-    required this.name,
-    required this.type,
-    required this.iconName,
-    required this.iconColor,
-    required this.amount,
-    required this.creditLimit,
-    required this.sequence,
-    required this.createdOn,
-    required this.updatedOn,
-  });
-
-  final String id;
-  final String name;
-  final AccountType type;
-  final String iconName;
-  final String iconColor;
-  final double amount;
-  final double creditLimit;
-  final int sequence;
-  final DateTime createdOn;
-  final DateTime updatedOn;
-
-  double get availableCredit => type == AccountType.credit ? creditLimit + amount : 0;
-
-  Account copyWith({
-    String? id,
-    String? name,
-    AccountType? type,
-    String? iconName,
-    String? iconColor,
-    double? amount,
-    double? creditLimit,
-    int? sequence,
-    DateTime? createdOn,
-    DateTime? updatedOn,
-  }) => Account(
-        id: id ?? this.id,
-        name: name ?? this.name,
-        type: type ?? this.type,
-        iconName: iconName ?? this.iconName,
-        iconColor: iconColor ?? this.iconColor,
-        amount: amount ?? this.amount,
-        creditLimit: creditLimit ?? this.creditLimit,
-        sequence: sequence ?? this.sequence,
-        createdOn: createdOn ?? this.createdOn,
-        updatedOn: updatedOn ?? this.updatedOn,
-      );
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'name': name,
-        'type': enumName(type),
-        'icon_name': iconName,
-        'icon_color': iconColor,
-        'amount': amount,
-        'credit_limit': creditLimit,
-        'sequence': sequence,
-        'created_on': dateToDb(createdOn),
-        'updated_on': dateToDb(updatedOn),
-      };
-
-  static Account fromMap(Map<String, Object?> map) => Account(
-        id: map['id'] as String,
-        name: map['name'] as String,
-        type: enumByName(AccountType.values, map['type'] as String?, AccountType.regular),
-        iconName: map['icon_name'] as String? ?? 'wallet',
-        iconColor: map['icon_color'] as String? ?? '#78D8E8',
-        amount: (map['amount'] as num? ?? 0).toDouble(),
-        creditLimit: (map['credit_limit'] as num? ?? 0).toDouble(),
-        sequence: (map['sequence'] as num? ?? 0).toInt(),
-        createdOn: dateFromDb(map['created_on']),
-        updatedOn: dateFromDb(map['updated_on']),
-      );
-}
-
-class Category {
-  Category({
-    required this.id,
-    required this.name,
-    required this.type,
-    required this.iconName,
-    required this.iconColor,
-    required this.createdOn,
-    required this.updatedOn,
-  });
-
-  final String id;
-  final String name;
-  final CategoryType type;
-  final String iconName;
-  final String iconColor;
-  final DateTime createdOn;
-  final DateTime updatedOn;
-
-  Category copyWith({
-    String? id,
-    String? name,
-    CategoryType? type,
-    String? iconName,
-    String? iconColor,
-    DateTime? createdOn,
-    DateTime? updatedOn,
-  }) => Category(
-        id: id ?? this.id,
-        name: name ?? this.name,
-        type: type ?? this.type,
-        iconName: iconName ?? this.iconName,
-        iconColor: iconColor ?? this.iconColor,
-        createdOn: createdOn ?? this.createdOn,
-        updatedOn: updatedOn ?? this.updatedOn,
-      );
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'name': name,
-        'type': enumName(type),
-        'icon_name': iconName,
-        'icon_color': iconColor,
-        'created_on': dateToDb(createdOn),
-        'updated_on': dateToDb(updatedOn),
-      };
-
-  static Category fromMap(Map<String, Object?> map) => Category(
-        id: map['id'] as String,
-        name: map['name'] as String,
-        type: enumByName(CategoryType.values, map['type'] as String?, CategoryType.expense),
-        iconName: map['icon_name'] as String? ?? 'category',
-        iconColor: map['icon_color'] as String? ?? '#78D8E8',
-        createdOn: dateFromDb(map['created_on']),
-        updatedOn: dateFromDb(map['updated_on']),
-      );
-
-  bool get isLoanSystemCategory => const {
-        'Loan Given',
-        'Loan Taken',
-        'Loan Repayment Received',
-        'Loan Repayment Paid',
-      }.contains(name);
-}
-
-class MoneyTransaction {
-  MoneyTransaction({
-    required this.id,
-    required this.type,
-    required this.amount,
-    required this.notes,
-    required this.categoryId,
-    required this.fromAccountId,
-    this.toAccountId,
-    this.imagePath = '',
-    this.loanId,
-    this.repaymentId,
-    required this.createdOn,
-    required this.updatedOn,
-  });
-
-  final String id;
-  final MoneyTransactionType type;
-  final double amount;
-  final String notes;
-  final String categoryId;
-  final String fromAccountId;
-  final String? toAccountId;
-  final String imagePath;
-  final String? loanId;
-  final String? repaymentId;
-  final DateTime createdOn;
-  final DateTime updatedOn;
-
-  bool get isLoanMovement => loanId != null;
-  bool get isLoanPrincipal => loanId != null && repaymentId == null;
-  bool get isLoanRepayment => loanId != null && repaymentId != null;
-
-  // Loan principal and repayment movements update account balances, but they are
-  // balance-sheet movements rather than income or expense for reports.
-  bool get countsAsIncome => type == MoneyTransactionType.income && !isLoanMovement;
-  bool get countsAsExpense => type == MoneyTransactionType.expense && !isLoanMovement;
-
-  String get displayType {
-    if (isLoanPrincipal) {
-      return type == MoneyTransactionType.income ? 'Loan Taken' : 'Loan Given';
-    }
-    if (isLoanRepayment) {
-      return type == MoneyTransactionType.income ? 'Loan Repayment Received' : 'Loan Repayment Paid';
-    }
-    return enumName(type);
-  }
-
-  MoneyTransaction copyWith({
-    String? id,
-    MoneyTransactionType? type,
-    double? amount,
-    String? notes,
-    String? categoryId,
-    String? fromAccountId,
-    String? toAccountId,
-    String? imagePath,
-    String? loanId,
-    String? repaymentId,
-    DateTime? createdOn,
-    DateTime? updatedOn,
-  }) => MoneyTransaction(
-        id: id ?? this.id,
-        type: type ?? this.type,
-        amount: amount ?? this.amount,
-        notes: notes ?? this.notes,
-        categoryId: categoryId ?? this.categoryId,
-        fromAccountId: fromAccountId ?? this.fromAccountId,
-        toAccountId: toAccountId ?? this.toAccountId,
-        imagePath: imagePath ?? this.imagePath,
-        loanId: loanId ?? this.loanId,
-        repaymentId: repaymentId ?? this.repaymentId,
-        createdOn: createdOn ?? this.createdOn,
-        updatedOn: updatedOn ?? this.updatedOn,
-      );
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'type': enumName(type),
-        'amount': amount,
-        'notes': notes,
-        'category_id': categoryId,
-        'from_account_id': fromAccountId,
-        'to_account_id': toAccountId,
-        'image_path': imagePath,
-        'loan_id': loanId,
-        'repayment_id': repaymentId,
-        'created_on': dateToDb(createdOn),
-        'updated_on': dateToDb(updatedOn),
-      };
-
-  static MoneyTransaction fromMap(Map<String, Object?> map) => MoneyTransaction(
-        id: map['id'] as String,
-        type: enumByName(MoneyTransactionType.values, map['type'] as String?, MoneyTransactionType.expense),
-        amount: (map['amount'] as num? ?? 0).toDouble(),
-        notes: map['notes'] as String? ?? '',
-        categoryId: map['category_id'] as String? ?? '',
-        fromAccountId: map['from_account_id'] as String? ?? '',
-        toAccountId: map['to_account_id'] as String?,
-        imagePath: map['image_path'] as String? ?? '',
-        loanId: map['loan_id'] as String?,
-        repaymentId: map['repayment_id'] as String?,
-        createdOn: dateFromDb(map['created_on']),
-        updatedOn: dateFromDb(map['updated_on']),
-      );
-}
-
-class Budget {
-  Budget({
-    required this.id,
-    required this.selectedMonth,
-    required this.amount,
-    required this.allAccountsSelected,
-    required this.allCategoriesSelected,
-    required this.accountIds,
-    required this.categoryIds,
-    required this.createdOn,
-    required this.updatedOn,
-  });
-
-  final String id;
-  final DateTime selectedMonth;
-  final double amount;
-  final bool allAccountsSelected;
-  final bool allCategoriesSelected;
-  final List<String> accountIds;
-  final List<String> categoryIds;
-  final DateTime createdOn;
-  final DateTime updatedOn;
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'selected_month': DateFormat('yyyy-MM').format(selectedMonth),
-        'amount': amount,
-        'all_accounts_selected': allAccountsSelected ? 1 : 0,
-        'all_categories_selected': allCategoriesSelected ? 1 : 0,
-        'created_on': dateToDb(createdOn),
-        'updated_on': dateToDb(updatedOn),
-      };
-
-  static Budget fromMap(Map<String, Object?> map, List<String> accountIds, List<String> categoryIds) {
-    final month = DateTime.tryParse('${map['selected_month'] as String? ?? DateFormat('yyyy-MM').format(DateTime.now())}-01') ?? DateTime.now();
-    return Budget(
-      id: map['id'] as String,
-      selectedMonth: month,
-      amount: (map['amount'] as num? ?? 0).toDouble(),
-      allAccountsSelected: (map['all_accounts_selected'] as num? ?? 1).toInt() == 1,
-      allCategoriesSelected: (map['all_categories_selected'] as num? ?? 1).toInt() == 1,
-      accountIds: accountIds,
-      categoryIds: categoryIds,
-      createdOn: dateFromDb(map['created_on']),
-      updatedOn: dateFromDb(map['updated_on']),
-    );
-  }
-
-  Budget copyWith({
-    String? id,
-    DateTime? selectedMonth,
-    double? amount,
-    bool? allAccountsSelected,
-    bool? allCategoriesSelected,
-    List<String>? accountIds,
-    List<String>? categoryIds,
-    DateTime? createdOn,
-    DateTime? updatedOn,
-  }) => Budget(
-        id: id ?? this.id,
-        selectedMonth: selectedMonth ?? this.selectedMonth,
-        amount: amount ?? this.amount,
-        allAccountsSelected: allAccountsSelected ?? this.allAccountsSelected,
-        allCategoriesSelected: allCategoriesSelected ?? this.allCategoriesSelected,
-        accountIds: accountIds ?? this.accountIds,
-        categoryIds: categoryIds ?? this.categoryIds,
-        createdOn: createdOn ?? this.createdOn,
-        updatedOn: updatedOn ?? this.updatedOn,
-      );
-}
-
-class Loan {
-  Loan({
-    required this.id,
-    required this.type,
-    required this.accountId,
-    required this.personName,
-    required this.amount,
-    required this.loanDate,
-    this.dueDate,
-    required this.notes,
-    required this.repaidAmount,
-    required this.status,
-    required this.createdOn,
-    required this.updatedOn,
-  });
-
-  final String id;
-  final LoanType type;
-  final String accountId;
-  final String personName;
-  final double amount;
-  final DateTime loanDate;
-  final DateTime? dueDate;
-  final String notes;
-  final double repaidAmount;
-  final LoanStatus status;
-  final DateTime createdOn;
-  final DateTime updatedOn;
-
-  double get remainingAmount => math.max<double>(0.0, amount - repaidAmount);
-  bool get isCompleted => status == LoanStatus.completed || remainingAmount <= 0.0001;
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'type': enumName(type),
-        'account_id': accountId,
-        'person_name': personName,
-        'amount': amount,
-        'loan_date': dateToDb(loanDate),
-        'due_date': dueDate == null ? null : dateToDb(dueDate!),
-        'notes': notes,
-        'repaid_amount': repaidAmount,
-        'status': enumName(status),
-        'created_on': dateToDb(createdOn),
-        'updated_on': dateToDb(updatedOn),
-      };
-
-  static Loan fromMap(Map<String, Object?> map) => Loan(
-        id: map['id'] as String,
-        type: enumByName(LoanType.values, map['type'] as String?, LoanType.given),
-        accountId: map['account_id'] as String? ?? '',
-        personName: map['person_name'] as String? ?? '',
-        amount: (map['amount'] as num? ?? 0).toDouble(),
-        loanDate: dateFromDb(map['loan_date']),
-        dueDate: map['due_date'] == null ? null : dateFromDb(map['due_date']),
-        notes: map['notes'] as String? ?? '',
-        repaidAmount: (map['repaid_amount'] as num? ?? 0).toDouble(),
-        status: enumByName(LoanStatus.values, map['status'] as String?, LoanStatus.open),
-        createdOn: dateFromDb(map['created_on']),
-        updatedOn: dateFromDb(map['updated_on']),
-      );
-
-  Loan copyWith({
-    String? id,
-    LoanType? type,
-    String? accountId,
-    String? personName,
-    double? amount,
-    DateTime? loanDate,
-    DateTime? dueDate,
-    String? notes,
-    double? repaidAmount,
-    LoanStatus? status,
-    DateTime? createdOn,
-    DateTime? updatedOn,
-  }) => Loan(
-        id: id ?? this.id,
-        type: type ?? this.type,
-        accountId: accountId ?? this.accountId,
-        personName: personName ?? this.personName,
-        amount: amount ?? this.amount,
-        loanDate: loanDate ?? this.loanDate,
-        dueDate: dueDate ?? this.dueDate,
-        notes: notes ?? this.notes,
-        repaidAmount: repaidAmount ?? this.repaidAmount,
-        status: status ?? this.status,
-        createdOn: createdOn ?? this.createdOn,
-        updatedOn: updatedOn ?? this.updatedOn,
-      );
-}
-
-class LoanRepayment {
-  LoanRepayment({
-    required this.id,
-    required this.loanId,
-    required this.accountId,
-    required this.amount,
-    required this.paidOn,
-    required this.notes,
-    required this.createdOn,
-  });
-
-  final String id;
-  final String loanId;
-  final String accountId;
-  final double amount;
-  final DateTime paidOn;
-  final String notes;
-  final DateTime createdOn;
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'loan_id': loanId,
-        'account_id': accountId,
-        'amount': amount,
-        'paid_on': dateToDb(paidOn),
-        'notes': notes,
-        'created_on': dateToDb(createdOn),
-      };
-
-  static LoanRepayment fromMap(Map<String, Object?> map) => LoanRepayment(
-        id: map['id'] as String,
-        loanId: map['loan_id'] as String? ?? '',
-        accountId: map['account_id'] as String? ?? '',
-        amount: (map['amount'] as num? ?? 0).toDouble(),
-        paidOn: dateFromDb(map['paid_on']),
-        notes: map['notes'] as String? ?? '',
-        createdOn: dateFromDb(map['created_on']),
-      );
-}
-
-
-class LoanRepaymentReminder {
-  LoanRepaymentReminder({
-    required this.id,
-    required this.loanId,
-    required this.accountId,
-    required this.amount,
-    required this.dueDate,
-    required this.reminderTimeMinutes,
-    required this.notes,
-    required this.isPaid,
-    this.paidOn,
-    required this.createdOn,
-    required this.updatedOn,
-  });
-
-  final String id;
-  final String loanId;
-  final String accountId;
-  final double amount;
-  final DateTime dueDate;
-  final int reminderTimeMinutes;
-  final String notes;
-  final bool isPaid;
-  final DateTime? paidOn;
-  final DateTime createdOn;
-  final DateTime updatedOn;
-
-  bool get isOverdue {
-    if (isPaid) return false;
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final dueDay = DateTime(dueDate.year, dueDate.month, dueDate.day);
-    return dueDay.isBefore(today);
-  }
-
-  bool get isDueToday {
-    if (isPaid) return false;
-    final now = DateTime.now();
-    return dueDate.year == now.year && dueDate.month == now.month && dueDate.day == now.day;
-  }
-
-  DateTime get reminderAt {
-    final hour = reminderTimeMinutes ~/ 60;
-    final minute = reminderTimeMinutes % 60;
-    return DateTime(dueDate.year, dueDate.month, dueDate.day, hour, minute);
-  }
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'loan_id': loanId,
-        'account_id': accountId,
-        'amount': amount,
-        'due_date': dateToDb(dueDate),
-        'reminder_time_minutes': reminderTimeMinutes,
-        'notes': notes,
-        'is_paid': isPaid ? 1 : 0,
-        'paid_on': paidOn == null ? null : dateToDb(paidOn!),
-        'created_on': dateToDb(createdOn),
-        'updated_on': dateToDb(updatedOn),
-      };
-
-  static LoanRepaymentReminder fromMap(Map<String, Object?> map) => LoanRepaymentReminder(
-        id: map['id'] as String,
-        loanId: map['loan_id'] as String? ?? '',
-        accountId: map['account_id'] as String? ?? '',
-        amount: (map['amount'] as num? ?? 0).toDouble(),
-        dueDate: dateFromDb(map['due_date']),
-        reminderTimeMinutes: (map['reminder_time_minutes'] as num? ?? (9 * 60)).toInt(),
-        notes: map['notes'] as String? ?? '',
-        isPaid: (map['is_paid'] as num? ?? 0).toInt() == 1,
-        paidOn: map['paid_on'] == null ? null : dateFromDb(map['paid_on']),
-        createdOn: dateFromDb(map['created_on']),
-        updatedOn: dateFromDb(map['updated_on']),
-      );
-
-  LoanRepaymentReminder copyWith({
-    String? id,
-    String? loanId,
-    String? accountId,
-    double? amount,
-    DateTime? dueDate,
-    int? reminderTimeMinutes,
-    String? notes,
-    bool? isPaid,
-    DateTime? paidOn,
-    DateTime? createdOn,
-    DateTime? updatedOn,
-  }) => LoanRepaymentReminder(
-        id: id ?? this.id,
-        loanId: loanId ?? this.loanId,
-        accountId: accountId ?? this.accountId,
-        amount: amount ?? this.amount,
-        dueDate: dueDate ?? this.dueDate,
-        reminderTimeMinutes: reminderTimeMinutes ?? this.reminderTimeMinutes,
-        notes: notes ?? this.notes,
-        isPaid: isPaid ?? this.isPaid,
-        paidOn: paidOn ?? this.paidOn,
-        createdOn: createdOn ?? this.createdOn,
-        updatedOn: updatedOn ?? this.updatedOn,
-      );
-}
-
-
-class SavingsSuggestionProfile {
-  const SavingsSuggestionProfile({
-    required this.completed,
-    required this.hobby,
-    required this.occupation,
-    required this.age,
-    required this.savingsGoal,
-    required this.spendingPreference,
-    required this.extraDetails,
-    required this.updatedOn,
-  });
-
-  final bool completed;
-  final String hobby;
-  final String occupation;
-  final int age;
-  final String savingsGoal;
-  final String spendingPreference;
-  final String extraDetails;
-  final DateTime? updatedOn;
-
-  static const empty = SavingsSuggestionProfile(
-    completed: false,
-    hobby: '',
-    occupation: '',
-    age: 0,
-    savingsGoal: '',
-    spendingPreference: '',
-    extraDetails: '',
-    updatedOn: null,
-  );
-
-  bool get hasPersonalDetails => hobby.trim().isNotEmpty || occupation.trim().isNotEmpty || age > 0 || savingsGoal.trim().isNotEmpty || spendingPreference.trim().isNotEmpty || extraDetails.trim().isNotEmpty;
-
-  String get shortLabel {
-    final parts = [
-      if (occupation.trim().isNotEmpty) occupation.trim(),
-      if (hobby.trim().isNotEmpty) hobby.trim(),
-      if (savingsGoal.trim().isNotEmpty) savingsGoal.trim(),
-    ];
-    if (parts.isEmpty) return completed ? 'Generic suggestions' : 'Not configured';
-    return parts.take(2).join(' • ');
-  }
-
-  Map<String, dynamic> toJson() => {
-        'completed': completed,
-        'hobby': hobby,
-        'occupation': occupation,
-        'age': age,
-        'savingsGoal': savingsGoal,
-        'spendingPreference': spendingPreference,
-        'extraDetails': extraDetails,
-        'updatedOn': updatedOn?.toIso8601String() ?? '',
-      };
-
-  static SavingsSuggestionProfile fromJson(Map<String, dynamic> json) => SavingsSuggestionProfile(
-        completed: json['completed'] as bool? ?? false,
-        hobby: json['hobby'] as String? ?? '',
-        occupation: json['occupation'] as String? ?? '',
-        age: (json['age'] as num? ?? 0).toInt(),
-        savingsGoal: json['savingsGoal'] as String? ?? '',
-        spendingPreference: json['spendingPreference'] as String? ?? '',
-        extraDetails: json['extraDetails'] as String? ?? '',
-        updatedOn: (json['updatedOn'] as String? ?? '').isEmpty ? null : DateTime.tryParse(json['updatedOn'] as String),
-      );
-
-  static SavingsSuggestionProfile fromJsonString(String raw) {
-    if (raw.trim().isEmpty) return SavingsSuggestionProfile.empty;
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is Map) return SavingsSuggestionProfile.fromJson(decoded.cast<String, dynamic>());
-    } catch (_) {}
-    return SavingsSuggestionProfile.empty;
-  }
-
-  SavingsSuggestionProfile copyWith({
-    bool? completed,
-    String? hobby,
-    String? occupation,
-    int? age,
-    String? savingsGoal,
-    String? spendingPreference,
-    String? extraDetails,
-    DateTime? updatedOn,
-  }) => SavingsSuggestionProfile(
-        completed: completed ?? this.completed,
-        hobby: hobby ?? this.hobby,
-        occupation: occupation ?? this.occupation,
-        age: age ?? this.age,
-        savingsGoal: savingsGoal ?? this.savingsGoal,
-        spendingPreference: spendingPreference ?? this.spendingPreference,
-        extraDetails: extraDetails ?? this.extraDetails,
-        updatedOn: updatedOn ?? this.updatedOn,
-      );
-}
-
-class SavingsPurchaseSuggestion {
-  const SavingsPurchaseSuggestion({
-    required this.id,
-    required this.title,
-    required this.costRange,
-    required this.reason,
-    required this.savingsFit,
-    required this.iconName,
-    required this.color,
-  });
-
-  final String id;
-  final String title;
-  final String costRange;
-  final String reason;
-  final String savingsFit;
-  final String iconName;
-  final String color;
-}
-
-class DateRange {
-  const DateRange(this.start, this.end, this.label);
-  final DateTime? start;
-  final DateTime? end;
-  final String label;
-}
-
-class Summary {
-  const Summary({required this.income, required this.expense});
-  final double income;
-  final double expense;
-  double get balance => income - expense;
-}
-
-class BudgetProgress {
-  BudgetProgress(this.budget, this.spent, this.transactions);
-  final Budget budget;
-  final double spent;
-  final List<MoneyTransaction> transactions;
-  double get ratio => budget.amount <= 0 ? 0 : spent / budget.amount;
 }
 
 // -----------------------------------------------------------------------------
@@ -1213,6 +378,36 @@ class KoinlyDatabase {
       }
     });
     return deletedIds;
+  }
+
+  Future<bool> hasOnlyUntouchedStarterAccounts() async {
+    final database = await db;
+    final starterNames = const {'Cash', 'Card', 'Bank Account'};
+    final rows = await database.query('accounts');
+    if (rows.length != starterNames.length) return false;
+
+    final accountNames = <String>{};
+    for (final row in rows) {
+      final account = Account.fromMap(row);
+      if (!starterNames.contains(account.name) || account.amount != 0 || account.creditLimit != 0) return false;
+      accountNames.add(account.name);
+    }
+    if (accountNames.length != rows.length) return false;
+    if (!accountNames.containsAll(starterNames)) return false;
+
+    final userActivityCount = sql.Sqflite.firstIntValue(await database.rawQuery(
+          '''
+          SELECT
+            (SELECT COUNT(*) FROM transactions) +
+            (SELECT COUNT(*) FROM budgets) +
+            (SELECT COUNT(*) FROM budget_accounts) +
+            (SELECT COUNT(*) FROM loans) +
+            (SELECT COUNT(*) FROM loan_repayments) +
+            (SELECT COUNT(*) FROM loan_repayment_reminders)
+          ''',
+        )) ??
+        0;
+    return userActivityCount == 0;
   }
 
   Future<void> reorderAccounts(List<Account> ordered) async {
@@ -1698,6 +893,16 @@ class KoinlyDatabase {
     return (await db).query('sync_outbox', orderBy: 'created_at ASC', limit: limit);
   }
 
+  Future<int> pendingSyncOperationCount() async {
+    final count = sql.Sqflite.firstIntValue(await (await db).rawQuery('SELECT COUNT(*) FROM sync_outbox'));
+    return count ?? 0;
+  }
+
+  Future<int> openSyncConflictCount() async {
+    final count = sql.Sqflite.firstIntValue(await (await db).rawQuery('SELECT COUNT(*) FROM sync_conflicts WHERE resolved_at IS NULL'));
+    return count ?? 0;
+  }
+
   Future<void> markOutboxUploaded(List<String> operationIds, Map<String, int> versionsByOperationId) async {
     if (operationIds.isEmpty) return;
     final database = await db;
@@ -1821,155 +1026,6 @@ class KoinlyDatabase {
   }
 }
 
-class PrefsStore {
-  SharedPreferences? _prefs;
-  Future<SharedPreferences> get prefs async => _prefs ??= await SharedPreferences.getInstance();
-
-  Future<T> getEnum<T>(String key, Iterable<T> values, T fallback) async => enumByName(values, (await prefs).getString(key), fallback);
-  Future<void> setEnum(String key, Object value) async => (await prefs).setString(key, enumName(value));
-  Future<bool> getBool(String key, bool fallback) async => (await prefs).getBool(key) ?? fallback;
-  Future<void> setBool(String key, bool value) async => (await prefs).setBool(key, value);
-  Future<String> getString(String key, String fallback) async => (await prefs).getString(key) ?? fallback;
-  Future<void> setString(String key, String value) async => (await prefs).setString(key, value);
-  Future<int> getInt(String key, int fallback) async => (await prefs).getInt(key) ?? fallback;
-  Future<void> setInt(String key, int value) async => (await prefs).setInt(key, value);
-  Future<List<String>> getStringList(String key) async => (await prefs).getStringList(key) ?? const [];
-  Future<void> setStringList(String key, List<String> value) async => (await prefs).setStringList(key, value);
-}
-
-class SecureCredentialStore {
-  SecureCredentialStore() : _storage = const FlutterSecureStorage();
-
-  final FlutterSecureStorage _storage;
-
-  static const _cloudSyncPinKey = 'koinly_cloud_sync_pin';
-  static const _mongoUrlKey = 'koinly_sync_mongodb_url';
-  static const _mongoSyncPinKey = 'koinly_sync_mongodb_pin';
-  static const _tursoAuthTokenKey = 'koinly_sync_turso_auth_token';
-  static const _accessTokenKey = 'koinly_account_access_token';
-  static const _refreshTokenKey = 'koinly_account_refresh_token';
-
-  Future<String> readCloudSyncPin() async => await _storage.read(key: _cloudSyncPinKey) ?? '';
-  Future<void> writeCloudSyncPin(String value) => _writeOrDelete(_cloudSyncPinKey, value);
-
-  Future<String> readMongoDbUrl() async => await _storage.read(key: _mongoUrlKey) ?? '';
-  Future<void> writeMongoDbUrl(String value) => _writeOrDelete(_mongoUrlKey, value);
-
-  Future<String> readMongoDbSyncPin() async => await _storage.read(key: _mongoSyncPinKey) ?? '';
-  Future<void> writeMongoDbSyncPin(String value) => _writeOrDelete(_mongoSyncPinKey, value);
-
-  Future<String> readTursoAuthToken() async => await _storage.read(key: _tursoAuthTokenKey) ?? '';
-  Future<void> writeTursoAuthToken(String value) => _writeOrDelete(_tursoAuthTokenKey, value);
-
-  Future<String> readAccessToken() async => await _storage.read(key: _accessTokenKey) ?? '';
-  Future<void> writeAccessToken(String value) => _writeOrDelete(_accessTokenKey, value);
-
-  Future<String> readRefreshToken() async => await _storage.read(key: _refreshTokenKey) ?? '';
-  Future<void> writeRefreshToken(String value) => _writeOrDelete(_refreshTokenKey, value);
-
-  Future<void> clearAccountTokens() async {
-    await _storage.delete(key: _accessTokenKey);
-    await _storage.delete(key: _refreshTokenKey);
-  }
-
-  Future<void> _writeOrDelete(String key, String value) async {
-    final normalized = value.trim();
-    if (normalized.isEmpty) {
-      await _storage.delete(key: key);
-    } else {
-      await _storage.write(key: key, value: normalized);
-    }
-  }
-}
-
-
-class ReminderService {
-  static final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
-
-  static Future<void> ensureInitialized() async {
-    if (!kSupportsLocalNotifications) return;
-    tzdata.initializeTimeZones();
-    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
-    const settings = InitializationSettings(android: android);
-    await _notifications.initialize(settings);
-    final androidPlugin = _notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    await androidPlugin?.requestNotificationsPermission();
-  }
-
-  static Future<void> scheduleDaily(TimeOfDay time) async {
-    if (!kSupportsLocalNotifications) return;
-    await cancel();
-    final scheduled = _next(time);
-    const details = NotificationDetails(
-      android: AndroidNotificationDetails(
-        'daily_expense_reminder',
-        'Daily expense reminder',
-        channelDescription: 'Reminder to add daily expenses.',
-        importance: Importance.high,
-        priority: Priority.high,
-      ),
-    );
-    await _notifications.zonedSchedule(
-      501,
-      'Koinly',
-      "Don’t forget to record your expenses",
-      scheduled,
-      details,
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.time,
-    );
-  }
-
-  static tz.TZDateTime _next(TimeOfDay time) {
-    final now = tz.TZDateTime.now(tz.local);
-    var date = tz.TZDateTime(tz.local, now.year, now.month, now.day, time.hour, time.minute);
-    if (date.isBefore(now)) date = date.add(const Duration(days: 1));
-    return date;
-  }
-
-
-  static int _loanReminderNotificationId(String id) => 700000 + (id.hashCode.abs() % 200000);
-
-  static Future<void> scheduleLoanRepaymentReminder({required Loan loan, required LoanRepaymentReminder reminder}) async {
-    if (!kSupportsLocalNotifications || reminder.isPaid) return;
-    final scheduled = tz.TZDateTime.from(reminder.reminderAt, tz.local);
-    if (scheduled.isBefore(tz.TZDateTime.now(tz.local))) return;
-    final label = loan.type == LoanType.given ? 'Loan repayment expected' : 'Loan repayment due';
-    final body = loan.type == LoanType.given
-        ? 'Expected repayment from ${loan.personName} is due on ${DateFormat('MMM d, yyyy').format(reminder.dueDate)}.'
-        : 'Repayment to ${loan.personName} is due on ${DateFormat('MMM d, yyyy').format(reminder.dueDate)}.';
-    const details = NotificationDetails(
-      android: AndroidNotificationDetails(
-        'loan_repayment_reminders',
-        'Loan repayment reminders',
-        channelDescription: 'Upcoming, due today, and overdue loan repayment alerts.',
-        importance: Importance.high,
-        priority: Priority.high,
-      ),
-    );
-    await _notifications.zonedSchedule(
-      _loanReminderNotificationId(reminder.id),
-      label,
-      body,
-      scheduled,
-      details,
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
-    );
-  }
-
-  static Future<void> cancelLoanRepaymentReminder(String id) async {
-    if (!kSupportsLocalNotifications) return;
-    await _notifications.cancel(_loanReminderNotificationId(id));
-  }
-
-  static Future<void> cancel() async {
-    if (!kSupportsLocalNotifications) return;
-    await _notifications.cancel(501);
-  }
-}
-
 class ExportService {
   static Future<void> exportCsv(AppController state, List<MoneyTransaction> txs) async {
     final dir = await getTemporaryDirectory();
@@ -2049,6 +1105,9 @@ class ExportService {
 }
 
 class BackupService {
+  static const String safetyBackupPrefix = 'koinly_safety_';
+  static const int maxSafetyBackups = 3;
+
   static String _crypt(String source) {
     final key = utf8.encode(backupPassword);
     final bytes = utf8.encode(source);
@@ -2067,6 +1126,19 @@ class BackupService {
     return 'koinly_backup_${DateFormat('yyyyMMdd_HHmm').format(DateTime.now())}.koinlybackup';
   }
 
+  static String safetyBackupFileName() {
+    return '${safetyBackupPrefix}${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.koinlybackup';
+  }
+
+  static Future<Directory> backupStorageDirectory() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final backupsDir = Directory(p.join(dir.path, 'backups'));
+    if (!await backupsDir.exists()) {
+      await backupsDir.create(recursive: true);
+    }
+    return backupsDir;
+  }
+
   static Future<File> createBackup(AppController state) async {
     final dir = await getTemporaryDirectory();
     final payload = {
@@ -2080,435 +1152,62 @@ class BackupService {
     return file;
   }
 
-  static Future<File> saveBackupToAppStorage(File source, {String? fileName}) async {
-    final dir = await getApplicationDocumentsDirectory();
-    final backupsDir = Directory(p.join(dir.path, 'backups'));
-    if (!await backupsDir.exists()) {
-      await backupsDir.create(recursive: true);
+  static Future<File> createSafetyBackup(AppController state, {required String reason}) async {
+    final backupsDir = await backupStorageDirectory();
+    final payload = {
+      'version': 4,
+      'backup_type': 'safety',
+      'reason': reason,
+      'created_at': DateTime.now().toIso8601String(),
+      'database': await state.database.exportAll(),
+      'preferences': await state.exportPreferences(),
+    };
+    final file = File(p.join(backupsDir.path, safetyBackupFileName()));
+    await file.writeAsString(_crypt(jsonEncode(payload)));
+    await pruneSafetyBackups();
+    return file;
+  }
+
+  static Future<void> pruneSafetyBackups() async {
+    final backupsDir = await backupStorageDirectory();
+    final files = await backupsDir
+        .list()
+        .where((entity) => entity is File && p.basename(entity.path).startsWith(safetyBackupPrefix) && entity.path.endsWith('.koinlybackup'))
+        .cast<File>()
+        .toList();
+    files.sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
+    for (final stale in files.skip(maxSafetyBackups)) {
+      try {
+        await stale.delete();
+      } catch (_) {
+        // A stale safety backup should never block a real backup/restore flow.
+      }
     }
+  }
+
+  static Future<File> saveBackupToAppStorage(File source, {String? fileName}) async {
+    final backupsDir = await backupStorageDirectory();
     final target = File(p.join(backupsDir.path, fileName ?? p.basename(source.path)));
     return source.copy(target.path);
   }
 
-  static Future<bool> restoreBackup(AppController state) async {
-    final picked = await FilePicker.platform.pickFiles(type: FileType.any);
-    if (picked == null || picked.files.single.path == null) return false;
-    final encrypted = await File(picked.files.single.path!).readAsString();
+  static Future<void> restoreBackupFile(AppController state, File file) async {
+    final encrypted = await file.readAsString();
     final payload = jsonDecode(_decrypt(encrypted)) as Map<String, dynamic>;
     await state.database.importAll((payload['database'] as Map).cast<String, dynamic>());
     await state.importPreferences((payload['preferences'] as Map? ?? {}).cast<String, dynamic>());
     await state.reload();
+  }
+
+  static Future<bool> restoreBackup(AppController state, {String? safetyReason}) async {
+    final picked = await FilePicker.platform.pickFiles(type: FileType.any);
+    if (picked == null || picked.files.single.path == null) return false;
+    if (safetyReason != null) {
+      await state.requireSafetyBackup(safetyReason);
+    }
+    await restoreBackupFile(state, File(picked.files.single.path!));
     return true;
   }
-}
-
-class CloudSyncException implements Exception {
-  const CloudSyncException(this.message, {this.code});
-
-  final String message;
-  final String? code;
-
-  bool get approvalRequired => code == 'SYNC_APPROVAL_REQUIRED';
-
-  @override
-  String toString() => message;
-}
-
-class CloudSyncService {
-  static const int payloadVersion = 5;
-  static const String defaultApiBaseUrl = String.fromEnvironment(
-    'KOINLY_SYNC_API_BASE_URL',
-    defaultValue: '',
-  );
-
-  static String get configuredApiBaseUrl => resolveApiBaseUrl(defaultApiBaseUrl);
-
-  static String normalizeSyncId(String value) {
-    return value.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9_.-]'), '-').replaceAll(RegExp(r'-+'), '-');
-  }
-
-  static String normalizeApiBaseUrl(String value) {
-    var normalized = value.trim();
-    while (normalized.endsWith('/')) {
-      normalized = normalized.substring(0, normalized.length - 1);
-    }
-    return normalized;
-  }
-
-  static String resolveApiBaseUrl([String? savedValue]) {
-    final fromBuild = normalizeApiBaseUrl(defaultApiBaseUrl);
-    if (fromBuild.isNotEmpty) return fromBuild;
-    return normalizeApiBaseUrl(savedValue ?? '');
-  }
-
-  static Future<void> upload({
-    required String apiBaseUrl,
-    required String syncId,
-    required String pin,
-    required Map<String, dynamic> payload,
-  }) async {
-    await _post(
-      apiBaseUrl: apiBaseUrl,
-      path: '/api/sync/push',
-      body: {
-        'syncId': normalizeSyncId(syncId),
-        'pin': pin.trim(),
-        'payload': payload,
-        'deviceId': Platform.localHostname,
-        'clientUpdatedAt': DateTime.now().toUtc().toIso8601String(),
-      },
-    );
-  }
-
-  static Future<Map<String, dynamic>> download({
-    required String apiBaseUrl,
-    required String syncId,
-    required String pin,
-  }) async {
-    final data = await _post(
-      apiBaseUrl: apiBaseUrl,
-      path: '/api/sync/pull',
-      body: {
-        'syncId': normalizeSyncId(syncId),
-        'pin': pin.trim(),
-        'deviceId': Platform.localHostname,
-      },
-    );
-    final payload = data['payload'];
-    if (payload is! Map) {
-      throw StateError('Cloud data is missing or damaged.');
-    }
-    return payload.cast<String, dynamic>();
-  }
-
-  static Future<void> testBackend(String apiBaseUrl) async {
-    final baseUrl = resolveApiBaseUrl(apiBaseUrl);
-    if (baseUrl.isEmpty || baseUrl.contains('your-koinly-sync-worker')) {
-      throw StateError('Add the Worker API URL first.');
-    }
-    final response = await http
-        .get(
-          Uri.parse(baseUrl),
-          headers: const {'accept': 'application/json'},
-        )
-        .timeout(const Duration(seconds: 18));
-    if (response.statusCode >= 500) {
-      throw StateError('Sync backend is reachable but returned a server error.');
-    }
-  }
-
-  static Future<Map<String, dynamic>> _post({
-    required String apiBaseUrl,
-    required String path,
-    required Map<String, dynamic> body,
-  }) async {
-    final baseUrl = resolveApiBaseUrl(apiBaseUrl);
-    if (baseUrl.isEmpty || baseUrl.contains('your-koinly-sync-worker')) {
-      throw StateError('Cloud sync backend URL is not configured in this APK. Rebuild with --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-worker.workers.dev.');
-    }
-    final uri = Uri.parse('$baseUrl$path');
-    final response = await http
-        .post(
-          uri,
-          headers: const {
-            'content-type': 'application/json',
-            'accept': 'application/json',
-          },
-          body: jsonEncode(body),
-        )
-        .timeout(const Duration(seconds: 25));
-
-    final decoded = response.body.trim().isEmpty ? <String, dynamic>{} : jsonDecode(response.body);
-    final data = decoded is Map ? decoded.cast<String, dynamic>() : <String, dynamic>{};
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw CloudSyncException(
-        data['error']?.toString() ?? 'Sync request failed (${response.statusCode}).',
-        code: data['code']?.toString(),
-      );
-    }
-    return data;
-  }
-}
-
-class SyncAuthSession {
-  const SyncAuthSession({
-    required this.accessToken,
-    required this.refreshToken,
-    required this.email,
-    required this.userId,
-    required this.deviceId,
-    required this.accessExpiresAt,
-  });
-
-  final String accessToken;
-  final String refreshToken;
-  final String email;
-  final String userId;
-  final String deviceId;
-  final DateTime accessExpiresAt;
-}
-
-class KoinlySyncApi {
-  KoinlySyncApi({required this.baseUrl});
-
-  final String baseUrl;
-
-  Uri _uri(String path, [Map<String, String>? query]) => Uri.parse('${CloudSyncService.normalizeApiBaseUrl(baseUrl)}$path').replace(queryParameters: query);
-
-  Future<SyncAuthSession> register({
-    required String email,
-    required String password,
-    required String deviceId,
-    required String deviceName,
-    required String platform,
-  }) async {
-    final data = await _post('/v1/auth/register', {
-      'email': email,
-      'password': password,
-      'deviceId': deviceId,
-      'deviceName': deviceName,
-      'platform': platform,
-    });
-    return _sessionFromResponse(data, email);
-  }
-
-  Future<SyncAuthSession> login({
-    required String email,
-    required String password,
-    required String deviceId,
-    required String deviceName,
-    required String platform,
-  }) async {
-    final data = await _post('/v1/auth/login', {
-      'email': email,
-      'password': password,
-      'deviceId': deviceId,
-      'deviceName': deviceName,
-      'platform': platform,
-    });
-    return _sessionFromResponse(data, email);
-  }
-
-  Future<SyncAuthSession> refresh({required String refreshToken, required String deviceId, required String email}) async {
-    final data = await _post('/v1/auth/refresh', {'refreshToken': refreshToken, 'deviceId': deviceId});
-    return _sessionFromResponse(data, email);
-  }
-
-  Future<void> logout({required String accessToken, required String refreshToken}) async {
-    await _post('/v1/auth/logout', {'refreshToken': refreshToken}, accessToken: accessToken);
-  }
-
-  Future<Map<String, dynamic>> push({required String accessToken, required List<Map<String, dynamic>> operations}) {
-    return _post('/v1/sync/push', {'operations': operations}, accessToken: accessToken);
-  }
-
-  Future<Map<String, dynamic>> replaceAll({required String accessToken, required List<Map<String, dynamic>> operations}) {
-    return _post('/v1/sync/replace', {'operations': operations}, accessToken: accessToken);
-  }
-
-  Future<Map<String, dynamic>> pull({required String accessToken, required int cursor, int limit = 100}) {
-    return _get('/v1/sync/pull', accessToken: accessToken, query: {'cursor': '$cursor', 'limit': '$limit'});
-  }
-
-  Future<Map<String, dynamic>> status({required String accessToken}) {
-    return _get('/v1/sync/status', accessToken: accessToken);
-  }
-
-  Future<Map<String, dynamic>> _get(String path, {String? accessToken, Map<String, String>? query}) async {
-    final response = await http
-        .get(
-          _uri(path, query),
-          headers: {
-            'accept': 'application/json',
-            if (accessToken != null && accessToken.isNotEmpty) 'authorization': 'Bearer $accessToken',
-          },
-        )
-        .timeout(const Duration(seconds: 25));
-    return _decodeResponse(response);
-  }
-
-  Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> body, {String? accessToken}) async {
-    final response = await http
-        .post(
-          _uri(path),
-          headers: {
-            'content-type': 'application/json',
-            'accept': 'application/json',
-            if (accessToken != null && accessToken.isNotEmpty) 'authorization': 'Bearer $accessToken',
-          },
-          body: jsonEncode(body),
-        )
-        .timeout(const Duration(seconds: 30));
-    return _decodeResponse(response);
-  }
-
-  Map<String, dynamic> _decodeResponse(http.Response response) {
-    Map<String, dynamic> data = <String, dynamic>{};
-    final rawBody = response.body.trim();
-    if (rawBody.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(rawBody);
-        data = decoded is Map ? decoded.cast<String, dynamic>() : <String, dynamic>{};
-      } catch (_) {
-        final compactBody = rawBody.replaceAll(RegExp(r'\s+'), ' ');
-        data = <String, dynamic>{'error': compactBody.length <= 240 ? compactBody : compactBody.substring(0, 240)};
-      }
-    }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw CloudSyncException(data['error']?.toString() ?? 'Request failed (${response.statusCode}).');
-    }
-    return data;
-  }
-
-  SyncAuthSession _sessionFromResponse(Map<String, dynamic> data, String fallbackEmail) {
-    final user = (data['user'] as Map? ?? {}).cast<String, dynamic>();
-    return SyncAuthSession(
-      accessToken: data['accessToken']?.toString() ?? '',
-      refreshToken: data['refreshToken']?.toString() ?? '',
-      email: user['email']?.toString() ?? fallbackEmail,
-      userId: user['id']?.toString() ?? '',
-      deviceId: data['deviceId']?.toString() ?? '',
-      accessExpiresAt: DateTime.fromMillisecondsSinceEpoch((data['accessExpiresAt'] as num? ?? DateTime.now().millisecondsSinceEpoch).toInt()),
-    );
-  }
-}
-
-class MongoDbSyncService {
-  static const String defaultDatabaseName = 'koinly';
-  static const String defaultCollectionName = 'koinly_sync_snapshots';
-  static const String snapshotDocumentId = 'koinly_latest_snapshot';
-
-  static String normalizeDatabaseName(String value) {
-    final normalized = value.trim();
-    if (normalized.isEmpty) return defaultDatabaseName;
-    return normalized.replaceAll(RegExp(r'[^a-zA-Z0-9_.-]'), '_');
-  }
-
-  static String normalizeCollectionName(String value) {
-    final normalized = value.trim();
-    if (normalized.isEmpty) return defaultCollectionName;
-    return normalized.replaceAll(RegExp(r'[^a-zA-Z0-9_.-]'), '_');
-  }
-
-  static Future<void> testConnection({
-    required String connectionString,
-    required String databaseName,
-    required String collectionName,
-  }) async {
-    final db = await _open(connectionString, databaseName);
-    try {
-      final collection = db.collection(normalizeCollectionName(collectionName));
-      await collection.findOne(mongo.where.eq('_id', '__koinly_connection_test__')).timeout(const Duration(seconds: 20));
-    } finally {
-      await db.close();
-    }
-  }
-
-  static Future<void> upload({
-    required String connectionString,
-    required String databaseName,
-    required String collectionName,
-    required Map<String, dynamic> payload,
-  }) async {
-    final db = await _open(connectionString, databaseName);
-    try {
-      final collection = db.collection(normalizeCollectionName(collectionName));
-      final now = DateTime.now().toUtc().toIso8601String();
-      await collection.replaceOne(
-        mongo.where.eq('_id', snapshotDocumentId),
-        <String, dynamic>{
-          '_id': snapshotDocumentId,
-          'payloadVersion': CloudSyncService.payloadVersion,
-          'payload': payload,
-          'deviceId': Platform.localHostname,
-          'updatedAt': now,
-        },
-        upsert: true,
-      ).timeout(const Duration(seconds: 28));
-    } finally {
-      await db.close();
-    }
-  }
-
-  static Future<Map<String, dynamic>> download({
-    required String connectionString,
-    required String databaseName,
-    required String collectionName,
-  }) async {
-    final db = await _open(connectionString, databaseName);
-    try {
-      final collection = db.collection(normalizeCollectionName(collectionName));
-      final document = await collection.findOne(mongo.where.eq('_id', snapshotDocumentId)).timeout(const Duration(seconds: 28));
-      if (document == null) {
-        throw StateError('No MongoDB sync snapshot exists yet. Upload local data first.');
-      }
-      final payload = document['payload'];
-      if (payload is! Map) {
-        throw StateError('MongoDB sync data is missing or damaged.');
-      }
-      final normalizedPayload = _normalizeBsonValue(payload);
-      if (normalizedPayload is! Map) {
-        throw StateError('MongoDB sync data is missing or damaged.');
-      }
-      return normalizedPayload.cast<String, dynamic>();
-    } finally {
-      await db.close();
-    }
-  }
-
-  static dynamic _normalizeBsonValue(dynamic value) {
-    if (value == null || value is String || value is bool || value is num) {
-      return value;
-    }
-    if (value is DateTime) {
-      return value.toIso8601String();
-    }
-    if (value is List) {
-      return value.map(_normalizeBsonValue).toList();
-    }
-    if (value is Map) {
-      return value.map((key, item) => MapEntry(key.toString(), _normalizeBsonValue(item)));
-    }
-
-    final typeName = value.runtimeType.toString();
-    if (typeName == 'Int64' || typeName.endsWith('.Int64')) {
-      return int.tryParse(value.toString()) ?? double.tryParse(value.toString()) ?? value.toString();
-    }
-    return value.toString();
-  }
-
-  static Future<mongo.Db> _open(String connectionString, String databaseName) async {
-    final normalized = connectionString.trim();
-    if (normalized.isEmpty) {
-      throw StateError('Add your MongoDB URL first.');
-    }
-    if (!normalized.startsWith('mongodb://') && !normalized.startsWith('mongodb+srv://')) {
-      throw StateError('MongoDB URL must start with mongodb:// or mongodb+srv://.');
-    }
-    final resolvedUri = _withDatabaseName(normalized, normalizeDatabaseName(databaseName));
-    final db = await mongo.Db.create(resolvedUri);
-    await db.open().timeout(const Duration(seconds: 22));
-    return db;
-  }
-
-  static String _withDatabaseName(String uri, String databaseName) {
-    final queryIndex = uri.indexOf('?');
-    final beforeQuery = queryIndex == -1 ? uri : uri.substring(0, queryIndex);
-    final query = queryIndex == -1 ? '' : uri.substring(queryIndex);
-    final schemeIndex = beforeQuery.indexOf('://');
-    if (schemeIndex == -1) return uri;
-    final hostStart = schemeIndex + 3;
-    final slashIndex = beforeQuery.indexOf('/', hostStart);
-    if (slashIndex == -1) {
-      return '$beforeQuery/$databaseName$query';
-    }
-    final path = beforeQuery.substring(slashIndex + 1).trim();
-    if (path.isEmpty) {
-      return '${beforeQuery.substring(0, slashIndex)}/$databaseName$query';
-    }
-    return uri;
-  }
-
 }
 
 Future<void> runBackupFlow(BuildContext context, AppController state) async {
@@ -2552,7 +1251,7 @@ Future<void> runBackupFlow(BuildContext context, AppController state) async {
 
 Future<void> runRestoreFlow(BuildContext context, AppController state) async {
   try {
-    final restored = await BackupService.restoreBackup(state);
+    final restored = await BackupService.restoreBackup(state, safetyReason: 'Before manual backup restore');
     if (!restored) return;
     await state.markRestoredDataForCloudUpload();
     if (context.mounted) {
@@ -2565,6 +1264,45 @@ Future<void> runRestoreFlow(BuildContext context, AppController state) async {
     if (context.mounted) {
       showSnack(context, 'Restore failed. Please check the backup file.');
     }
+  }
+}
+
+Future<void> runRestoreLastSafetyBackupFlow(BuildContext context, AppController state) async {
+  try {
+    final restored = await state.restoreLastSafetyBackup();
+    if (!restored) {
+      if (context.mounted) showSnack(context, 'No safety backup is available yet.');
+      return;
+    }
+    if (context.mounted) {
+      showSnack(
+        context,
+        state.cloudSyncEnabled ? 'Safety backup restored. It is uploading to cloud sync.' : 'Safety backup restored.',
+      );
+    }
+  } catch (_) {
+    if (context.mounted) {
+      showSnack(context, 'Could not restore the safety backup.');
+    }
+  }
+}
+
+Future<void> copyDiagnosticsReportFlow(BuildContext context, AppController state) async {
+  try {
+    final report = await state.buildDiagnosticsReport();
+    await Clipboard.setData(ClipboardData(text: report));
+    if (context.mounted) showSnack(context, 'Diagnostics report copied.');
+  } catch (_) {
+    if (context.mounted) showSnack(context, 'Could not build diagnostics report.');
+  }
+}
+
+Future<void> shareDiagnosticsReportFlow(BuildContext context, AppController state) async {
+  try {
+    final report = await state.buildDiagnosticsReport();
+    await Share.share(report, subject: 'Koinly diagnostics');
+  } catch (_) {
+    if (context.mounted) showSnack(context, 'Could not share diagnostics report.');
   }
 }
 
@@ -2582,6 +1320,7 @@ class AppController extends ChangeNotifier {
 
   bool loading = true;
   bool onboardingCompleted = false;
+  bool starterAccountsSkipped = false;
   int desktopSetupVersionCompleted = 0;
   bool authenticated = false;
   int tabIndex = 0;
@@ -2630,6 +1369,7 @@ class AppController extends ChangeNotifier {
   String? defaultExpenseCategoryId;
   String? defaultIncomeCategoryId;
   bool compactHomeSummary = false;
+  bool reducedMotion = kIsDesktopApp;
   bool appLockEnabled = false;
   bool reminderEnabled = false;
   TimeOfDay reminderTime = const TimeOfDay(hour: 21, minute: 0);
@@ -2672,6 +1412,10 @@ class AppController extends ChangeNotifier {
   String pendingAndroidUpdatePath = '';
   String pendingAndroidUpdateVersion = '';
   UpdateAssetKind? pendingAndroidUpdateKind;
+  String lastSafetyBackupPath = '';
+  DateTime? lastSafetyBackupAt;
+  DataHealthReport? dataHealthReport;
+  bool dataHealthBusy = false;
   String? _shownUpdateDialogVersionThisSession;
   http.Client? _updateDownloadClient;
 
@@ -2719,6 +1463,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> _loadPreferences() async {
     onboardingCompleted = await prefs.getBool('onboardingCompleted', false);
+    starterAccountsSkipped = await prefs.getBool('starterAccountsSkipped', false);
     desktopSetupVersionCompleted = await prefs.getInt('desktopSetupVersionCompleted', 0);
     themePreference = await prefs.getEnum('themePreference', ThemePreference.values, ThemePreference.system);
     currencySymbol = await prefs.getString('currencySymbol', '৳');
@@ -2746,6 +1491,7 @@ class AppController extends ChangeNotifier {
     defaultIncomeCategoryId = await prefs.getString('defaultIncomeCategoryId', '');
     if (defaultIncomeCategoryId?.isEmpty == true) defaultIncomeCategoryId = null;
     compactHomeSummary = await prefs.getBool('compactHomeSummary', false);
+    reducedMotion = await prefs.getBool('reducedMotion', kIsDesktopApp);
     appLockEnabled = await prefs.getBool('appLockEnabled', false);
     reminderEnabled = await prefs.getBool('reminderEnabled', false);
     final hour = await prefs.getInt('reminderHour', 21);
@@ -2797,6 +1543,238 @@ class AppController extends ChangeNotifier {
     if (pendingAndroidUpdatePath.isNotEmpty && !await File(pendingAndroidUpdatePath).exists()) {
       await _clearPendingAndroidUpdate();
     }
+    lastSafetyBackupPath = await prefs.getString('lastSafetyBackupPath', '');
+    final safetyAtRaw = await prefs.getString('lastSafetyBackupAt', '');
+    lastSafetyBackupAt = safetyAtRaw.isEmpty ? null : DateTime.tryParse(safetyAtRaw);
+    if (lastSafetyBackupPath.isNotEmpty && !await File(lastSafetyBackupPath).exists()) {
+      lastSafetyBackupPath = '';
+      lastSafetyBackupAt = null;
+      await prefs.setString('lastSafetyBackupPath', '');
+      await prefs.setString('lastSafetyBackupAt', '');
+    }
+  }
+
+  String get lastSafetyBackupLabel {
+    if (lastSafetyBackupAt == null) return 'No safety backup yet';
+    return 'Last saved ${DateFormat('MMM d, yyyy • h:mm a').format(lastSafetyBackupAt!.toLocal())}';
+  }
+
+  bool get hasLastSafetyBackup => lastSafetyBackupPath.isNotEmpty && File(lastSafetyBackupPath).existsSync();
+
+  Future<File?> createSafetyBackup(String reason) async {
+    try {
+      final file = await BackupService.createSafetyBackup(this, reason: reason);
+      lastSafetyBackupPath = file.path;
+      lastSafetyBackupAt = DateTime.now();
+      await prefs.setString('lastSafetyBackupPath', lastSafetyBackupPath);
+      await prefs.setString('lastSafetyBackupAt', lastSafetyBackupAt!.toIso8601String());
+      notifyListeners();
+      return file;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> requireSafetyBackup(String reason) async {
+    final file = await createSafetyBackup(reason);
+    if (file == null) {
+      throw StateError('Could not create a safety backup before overwriting local data.');
+    }
+  }
+
+  Future<bool> restoreLastSafetyBackup() async {
+    if (!hasLastSafetyBackup) return false;
+    await BackupService.restoreBackupFile(this, File(lastSafetyBackupPath));
+    await markRestoredDataForCloudUpload();
+    return true;
+  }
+
+  Future<DataHealthReport> checkDataHealth() async {
+    dataHealthBusy = true;
+    notifyListeners();
+    try {
+      final items = <DataHealthItem>[];
+      final accountIds = accounts.map((account) => account.id).toSet();
+      final categoryIds = categories.map((category) => category.id).toSet();
+
+      var missingAccountReferences = 0;
+      var missingCategoryReferences = 0;
+      for (final tx in transactions) {
+        if (tx.fromAccountId.isEmpty || !accountIds.contains(tx.fromAccountId)) {
+          missingAccountReferences += 1;
+        }
+        if (tx.type == MoneyTransactionType.transfer && (tx.toAccountId == null || !accountIds.contains(tx.toAccountId))) {
+          missingAccountReferences += 1;
+        }
+        if (tx.type != MoneyTransactionType.transfer && tx.categoryId.isNotEmpty && !categoryIds.contains(tx.categoryId)) {
+          missingCategoryReferences += 1;
+        }
+      }
+
+      var invalidBudgetScopes = 0;
+      for (final budget in budgets) {
+        if (!budget.allAccountsSelected && budget.accountIds.any((id) => !accountIds.contains(id))) {
+          invalidBudgetScopes += 1;
+        }
+        if (!budget.allCategoriesSelected && budget.categoryIds.any((id) => !categoryIds.contains(id))) {
+          invalidBudgetScopes += 1;
+        }
+      }
+
+      final pendingSyncOperations = await database.pendingSyncOperationCount();
+      final openSyncConflicts = await database.openSyncConflictCount();
+      final skippedStarterPlaceholdersVisible = starterAccountsSkipped && await database.hasOnlyUntouchedStarterAccounts();
+
+      if (accounts.isEmpty) {
+        items.add(const DataHealthItem(
+          severity: DataHealthSeverity.info,
+          title: 'No accounts yet',
+          body: 'This is okay for offline-first use. Add an account when you want to start tracking balances.',
+        ));
+      }
+      if (categories.where((category) => !category.isLoanSystemCategory).isEmpty) {
+        items.add(const DataHealthItem(
+          severity: DataHealthSeverity.warning,
+          title: 'No visible categories',
+          body: 'Transactions need income or expense categories for clean reports and breakdowns.',
+        ));
+      }
+      if (missingAccountReferences > 0) {
+        items.add(DataHealthItem(
+          severity: DataHealthSeverity.error,
+          title: 'Broken account references',
+          body: '$missingAccountReferences transaction account reference${missingAccountReferences == 1 ? '' : 's'} point to missing accounts.',
+        ));
+      }
+      if (missingCategoryReferences > 0) {
+        items.add(DataHealthItem(
+          severity: DataHealthSeverity.warning,
+          title: 'Missing transaction categories',
+          body: '$missingCategoryReferences transaction${missingCategoryReferences == 1 ? '' : 's'} point to categories that no longer exist.',
+        ));
+      }
+      if (invalidBudgetScopes > 0) {
+        items.add(DataHealthItem(
+          severity: DataHealthSeverity.warning,
+          title: 'Budget scope needs review',
+          body: '$invalidBudgetScopes budget account/category selection${invalidBudgetScopes == 1 ? '' : 's'} include missing records.',
+        ));
+      }
+      if (openSyncConflicts > 0) {
+        items.add(DataHealthItem(
+          severity: DataHealthSeverity.error,
+          title: 'Sync conflicts pending',
+          body: '$openSyncConflicts cloud sync conflict${openSyncConflicts == 1 ? '' : 's'} need attention before every device can fully agree.',
+        ));
+      }
+      if (pendingSyncOperations > 0) {
+        items.add(DataHealthItem(
+          severity: DataHealthSeverity.info,
+          title: 'Cloud upload backlog',
+          body: '$pendingSyncOperations local change${pendingSyncOperations == 1 ? '' : 's'} are waiting to sync when the backend is reachable.',
+        ));
+      }
+      if (skippedStarterPlaceholdersVisible) {
+        items.add(const DataHealthItem(
+          severity: DataHealthSeverity.warning,
+          title: 'Skipped starter accounts are still visible',
+          body: 'The setup skip flag is saved, but untouched Cash/Card/Bank Account placeholders are still in local data.',
+          actionLabel: 'Remove starter accounts',
+        ));
+      }
+
+      final report = DataHealthReport(
+        checkedAt: DateTime.now(),
+        items: List.unmodifiable(items),
+        accountCount: accounts.length,
+        categoryCount: categories.where((category) => !category.isLoanSystemCategory).length,
+        transactionCount: transactions.length,
+        budgetCount: budgets.length,
+        pendingSyncOperations: pendingSyncOperations,
+        openSyncConflicts: openSyncConflicts,
+        skippedStarterPlaceholdersVisible: skippedStarterPlaceholdersVisible,
+      );
+      dataHealthReport = report;
+      return report;
+    } finally {
+      dataHealthBusy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> removeSkippedStarterAccountsFromHealthCheck() async {
+    final deletedStarterAccountIds = await database.deleteUntouchedStarterAccounts();
+    for (final accountId in deletedStarterAccountIds) {
+      await database.enqueueDelete('accounts', accountId);
+    }
+    await reload(queueSync: deletedStarterAccountIds.isNotEmpty);
+    await checkDataHealth();
+  }
+
+  String _maskedSyncEmail() {
+    final trimmed = syncAccountEmail.trim();
+    if (trimmed.isEmpty || !trimmed.contains('@')) return trimmed.isEmpty ? 'Not signed in' : 'Configured';
+    final parts = trimmed.split('@');
+    final name = parts.first;
+    final domain = parts.skip(1).join('@');
+    final visibleName = name.isEmpty
+        ? '*'
+        : name.length <= 2
+            ? '${name.substring(0, 1)}*'
+            : '${name.substring(0, 2)}***';
+    return '$visibleName@$domain';
+  }
+
+  Future<String> buildDiagnosticsReport() async {
+    final report = await checkDataHealth();
+    final buffer = StringBuffer()
+      ..writeln('Koinly diagnostics')
+      ..writeln('Generated: ${DateTime.now().toIso8601String()}')
+      ..writeln('Installed version: $appVersion')
+      ..writeln('Platform: ${_platformName()}')
+      ..writeln('')
+      ..writeln('Setup')
+      ..writeln('- Onboarding completed: $onboardingCompleted')
+      ..writeln('- Current platform setup completed: $setupCompletedForCurrentPlatform')
+      ..writeln('- Starter accounts skipped: $starterAccountsSkipped')
+      ..writeln('- Performance mode: $reducedMotion')
+      ..writeln('')
+      ..writeln('Local data')
+      ..writeln('- Accounts: ${report.accountCount}')
+      ..writeln('- Visible categories: ${report.categoryCount}')
+      ..writeln('- Transactions: ${report.transactionCount}')
+      ..writeln('- Budgets: ${report.budgetCount}')
+      ..writeln('- Last safety backup: ${lastSafetyBackupAt?.toIso8601String() ?? 'none'}')
+      ..writeln('')
+      ..writeln('Sync')
+      ..writeln('- Backend build config present: ${CloudSyncService.configuredApiBaseUrl.isNotEmpty}')
+      ..writeln('- Signed in: $cloudSyncEnabled')
+      ..writeln('- Account: ${_maskedSyncEmail()}')
+      ..writeln('- Status: $syncStatus')
+      ..writeln('- Pending upload operations: ${report.pendingSyncOperations}')
+      ..writeln('- Open sync conflicts: ${report.openSyncConflicts}')
+      ..writeln('- Last successful sync: ${cloudSyncLastAt?.toIso8601String() ?? 'none'}')
+      ..writeln('- Sync pending retry: $cloudSyncPending');
+    if (cloudSyncError != null && cloudSyncError!.trim().isNotEmpty) {
+      buffer.writeln('- Last sync error: ${redactSyncSecrets(cloudSyncError!)}');
+    }
+    buffer
+      ..writeln('')
+      ..writeln('Updates')
+      ..writeln('- Repository: $updateRepositorySlug')
+      ..writeln('- Update status: $updateStatusMessage')
+      ..writeln('- Latest release: ${latestGithubRelease?.displayVersion ?? 'not checked'}')
+      ..writeln('- Pending Android APK: ${pendingAndroidUpdatePath.isNotEmpty ? pendingAndroidUpdateVersion : 'none'}')
+      ..writeln('')
+      ..writeln('Health findings');
+    if (report.items.isEmpty) {
+      buffer.writeln('- Healthy: no findings');
+    } else {
+      for (final item in report.items) {
+        buffer.writeln('- ${enumName(item.severity)}: ${item.title} — ${item.body}');
+      }
+    }
+    return buffer.toString();
   }
 
   Future<Map<String, dynamic>> exportPreferences() async => {
@@ -2834,6 +1812,8 @@ class AppController extends ChangeNotifier {
     final sp = await prefs.prefs;
     const deviceLocalKeys = {
       'onboardingCompleted',
+      'starterAccountsSkipped',
+      'reducedMotion',
       'desktopSetupVersionCompleted',
       'cloudSyncEnabled',
       'cloudSyncPending',
@@ -2868,13 +1848,14 @@ class AppController extends ChangeNotifier {
       };
 
   String get cloudSyncStatusText {
-    if (cloudSyncBusy) return 'Online sync • Syncing...';
-    if (cloudSyncPending) return 'Online sync • Waiting for internet';
+    if (cloudSyncBusy) return syncStatus.trim().isEmpty ? 'Online sync • Syncing...' : syncStatus;
+    if (authoritativeCloudUploadPending) return 'Restore upload pending';
+    if (cloudSyncPending) return 'Sync pending • Waiting for internet';
     if (cloudSyncErrorCode == 'SYNC_APPROVAL_REQUIRED') return 'Online sync • Admin approval required';
-    if (cloudSyncError != null && cloudSyncError!.trim().isNotEmpty) return 'Online sync • Error: $cloudSyncError';
-    if (!cloudSyncEnabled) return 'Online sync • Sign in required';
-    if (cloudSyncLastAt == null) return 'Online sync • Enabled • Not synced yet';
-    return 'Online sync • Last sync ${DateFormat('yyyy-MM-dd HH:mm').format(cloudSyncLastAt!.toLocal())}';
+    if (cloudSyncError != null && cloudSyncError!.trim().isNotEmpty) return 'Sync error • $cloudSyncError';
+    if (!cloudSyncEnabled) return 'Sign in required';
+    if (cloudSyncLastAt == null) return 'Signed in • Not synced yet';
+    return 'Synced • ${DateFormat('yyyy-MM-dd HH:mm').format(cloudSyncLastAt!.toLocal())}';
   }
 
   bool get cloudSyncApprovalRequired => cloudSyncErrorCode == 'SYNC_APPROVAL_REQUIRED';
@@ -3301,6 +2282,7 @@ class AppController extends ChangeNotifier {
       final payload = await CloudSyncService.download(apiBaseUrl: cloudSyncApiBaseUrl, syncId: cloudSyncId, pin: cloudSyncPin);
       final databasePayload = (payload['database'] as Map? ?? {}).cast<String, dynamic>();
       final preferencesPayload = (payload['preferences'] as Map? ?? {}).cast<String, dynamic>();
+      await requireSafetyBackup('Before legacy online cloud restore');
       await database.importAll(databasePayload);
       await importPreferences(preferencesPayload);
       cloudSyncEnabled = true;
@@ -3337,11 +2319,11 @@ class AppController extends ChangeNotifier {
     await _authenticateSyncAccount(register: true, email: email, password: password);
   }
 
-  Future<void> loginSyncAccount({required String email, required String password}) async {
-    await _authenticateSyncAccount(register: false, email: email, password: password);
+  Future<void> loginSyncAccount({required String email, required String password, bool preferCloudData = false}) async {
+    await _authenticateSyncAccount(register: false, email: email, password: password, preferCloudData: preferCloudData);
   }
 
-  Future<void> _authenticateSyncAccount({required bool register, required String email, required String password}) async {
+  Future<void> _authenticateSyncAccount({required bool register, required String email, required String password, bool preferCloudData = false}) async {
     syncAuthBusy = true;
     cloudSyncError = null;
     syncStatus = register ? 'Creating account...' : 'Signing in...';
@@ -3357,14 +2339,18 @@ class AppController extends ChangeNotifier {
           : await api.login(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName());
       await _saveSyncSession(session);
       await database.writeSyncState('serverCursor', '0');
-      if (authoritativeCloudUploadPending) {
+      final shouldUploadAuthoritativeData = authoritativeCloudUploadPending && (register || !preferCloudData);
+      if (shouldUploadAuthoritativeData) {
         await uploadAuthoritativeCloudData(silent: true);
       } else if (register) {
         await database.enqueueAllForAdoption(await exportPreferences());
         await performMultiDeviceSync(silent: true);
       } else {
-        await database.clearFinanceDataForRemoteLogin();
-        await performMultiDeviceSync(silent: true, pushLocalChanges: false);
+        if (authoritativeCloudUploadPending) {
+          authoritativeCloudUploadPending = false;
+          await prefs.setBool('authoritativeCloudUploadPending', false);
+        }
+        await performMultiDeviceSync(silent: !preferCloudData, pushLocalChanges: false);
       }
     } catch (error) {
       cloudSyncError = _cleanSyncError(error);
@@ -3424,12 +2410,16 @@ class AppController extends ChangeNotifier {
     if (!silent) {
       cloudSyncError = null;
       cloudSyncErrorCode = null;
-      syncStatus = 'Syncing...';
+      syncStatus = pushLocalChanges ? 'Checking local changes...' : 'Checking cloud data...';
       notifyListeners();
     }
     try {
       final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
       if (pushLocalChanges) {
+        if (!silent) {
+          syncStatus = 'Uploading local changes...';
+          notifyListeners();
+        }
         var uploadPass = 0;
         while (uploadPass < 100) {
           uploadPass += 1;
@@ -3473,6 +2463,10 @@ class AppController extends ChangeNotifier {
       var cursor = replaceLocalData ? 0 : (int.tryParse(await database.readSyncState('serverCursor', '0')) ?? 0);
       var hasMore = true;
       final remoteChanges = <Map<String, dynamic>>[];
+      if (!silent) {
+        syncStatus = replaceLocalData ? 'Downloading cloud copy...' : 'Checking cloud changes...';
+        notifyListeners();
+      }
       while (hasMore) {
         final response = await api.pull(accessToken: syncAccessToken, cursor: cursor, limit: 100);
         final changes = (response['changes'] as List? ?? const []).whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
@@ -3481,9 +2475,25 @@ class AppController extends ChangeNotifier {
         hasMore = response['hasMore'] == true;
       }
       if (replaceLocalData) {
+        if (!silent) {
+          syncStatus = 'Saving safety backup...';
+          notifyListeners();
+        }
+        await requireSafetyBackup('Before cloud data overwrite');
+        if (!silent) {
+          syncStatus = 'Overwriting local data with cloud copy...';
+          notifyListeners();
+        }
         await database.clearFinanceDataForRemoteLogin();
       }
       if (remoteChanges.isNotEmpty) {
+        if (!silent) {
+          syncStatus = 'Applying cloud changes...';
+          notifyListeners();
+        }
+        if (!replaceLocalData && remoteChanges.any((change) => change['entityType'] == '__reset__')) {
+          await requireSafetyBackup('Before cloud reset operation');
+        }
         await database.applyRemoteChanges(remoteChanges, importPreferences);
       }
       await database.writeSyncState('serverCursor', '$cursor');
@@ -3493,7 +2503,7 @@ class AppController extends ChangeNotifier {
       await _setCloudSyncPending(false);
       cloudSyncError = null;
       cloudSyncErrorCode = null;
-      syncStatus = 'Synced';
+      syncStatus = replaceLocalData ? 'Cloud copy restored' : 'Synced';
       if (replaceLocalData || remoteChanges.isNotEmpty) {
         await reload();
       }
@@ -3678,7 +2688,34 @@ class AppController extends ChangeNotifier {
     super.dispose();
   }
 
+  Future<bool> _removeSkippedStarterAccountsIfNeeded() async {
+    var shouldRemoveStarterAccounts = starterAccountsSkipped;
+    if (!shouldRemoveStarterAccounts && onboardingCompleted && await database.hasOnlyUntouchedStarterAccounts()) {
+      starterAccountsSkipped = true;
+      shouldRemoveStarterAccounts = true;
+      await prefs.setBool('starterAccountsSkipped', true);
+    }
+    if (!shouldRemoveStarterAccounts) return false;
+
+    final stillHasOnlyUntouchedStarterAccounts = await database.hasOnlyUntouchedStarterAccounts();
+    if (!stillHasOnlyUntouchedStarterAccounts) return false;
+
+    final deletedStarterAccountIds = await database.deleteUntouchedStarterAccounts();
+    for (final accountId in deletedStarterAccountIds) {
+      await database.enqueueDelete('accounts', accountId);
+    }
+    final remainingAccounts = await database.accounts();
+    if (defaultAccountId != null && !remainingAccounts.any((account) => account.id == defaultAccountId)) {
+      defaultAccountId = remainingAccounts.where((a) => a.type != AccountType.savings).firstOrNull?.id ?? remainingAccounts.firstOrNull?.id;
+      await prefs.setString('defaultAccountId', defaultAccountId ?? '');
+    }
+    return deletedStarterAccountIds.isNotEmpty;
+  }
+
   Future<void> reload({bool queueSync = false}) async {
+    if (await _removeSkippedStarterAccountsIfNeeded()) {
+      queueSync = true;
+    }
     accounts = await database.accounts();
     categories = await database.categories();
     transactions = await database.transactions();
@@ -3718,6 +2755,8 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> skipStarterAccounts() async {
+    starterAccountsSkipped = true;
+    await prefs.setBool('starterAccountsSkipped', true);
     final deletedStarterAccountIds = await database.deleteUntouchedStarterAccounts();
     for (final accountId in deletedStarterAccountIds) {
       await database.enqueueDelete('accounts', accountId);
@@ -4002,6 +3041,12 @@ class AppController extends ChangeNotifier {
     await queuePreferenceSync();
   }
 
+  Future<void> setReducedMotion(bool value) async {
+    reducedMotion = value;
+    await prefs.setBool('reducedMotion', value);
+    notifyListeners();
+  }
+
   Future<void> setAppLock(bool value) async {
     appLockEnabled = value;
     await prefs.setBool('appLockEnabled', value);
@@ -4169,11 +3214,6 @@ class AppController extends ChangeNotifier {
   }
 }
 
-extension FirstOrNullExtension<T> on Iterable<T> {
-  T? get firstOrNull => isEmpty ? null : first;
-}
-
-
 String savingsSuggestionDayKey([DateTime? date]) {
   final value = date ?? DateTime.now();
   return DateFormat('yyyy-MM-dd').format(value);
@@ -4257,152 +3297,17 @@ List<SavingsPurchaseSuggestion> buildSavingsPurchaseSuggestions(AppController st
 // -----------------------------------------------------------------------------
 
 
-class AppBreakpoints {
-  const AppBreakpoints._();
-
-  static const double compact = 360;
-  static const double medium = 600;
-  static const double expanded = 900;
-  static const double large = 1180;
-
-  static bool isSmall(BuildContext context) => MediaQuery.sizeOf(context).width < compact;
-  static bool isMedium(BuildContext context) => MediaQuery.sizeOf(context).width >= medium;
-  static bool isExpanded(BuildContext context) => MediaQuery.sizeOf(context).width >= expanded;
-  static bool isLarge(BuildContext context) => MediaQuery.sizeOf(context).width >= large;
-}
-
-class AppMotion {
-  const AppMotion._();
-
-  static const Duration fast = Duration(milliseconds: 90);
-  static const Duration medium = Duration(milliseconds: 140);
-  static const Duration slow = Duration(milliseconds: 220);
-
-  static const Curve standard = Cubic(0.2, 0.0, 0.0, 1.0);
-  static const Curve emphasized = Cubic(0.05, 0.7, 0.1, 1.0);
-  static const Curve emphasizedAccelerate = Cubic(0.3, 0.0, 0.8, 0.15);
-  static const Curve spring = Curves.easeOutCubic;
-}
-
-class AppShapes {
-  const AppShapes._();
-
-  static BorderRadius extraSmall = BorderRadius.circular(12);
-  static BorderRadius small = BorderRadius.circular(16);
-  static BorderRadius medium = BorderRadius.circular(20);
-  static BorderRadius large = BorderRadius.circular(24);
-  static BorderRadius extraLarge = BorderRadius.circular(30);
-  static BorderRadius dialog = BorderRadius.circular(32);
-  static BorderRadius full = BorderRadius.circular(999);
-
-  static RoundedRectangleBorder squircle(double radius) => RoundedRectangleBorder(borderRadius: BorderRadius.circular(radius));
-}
-
-class KoinlyPageTransitionsBuilder extends PageTransitionsBuilder {
-  const KoinlyPageTransitionsBuilder();
-
-  @override
-  Widget buildTransitions<T>(
-    PageRoute<T> route,
-    BuildContext context,
-    Animation<double> animation,
-    Animation<double> secondaryAnimation,
-    Widget child,
-  ) {
-    if (route.isFirst) return child;
-    final fade = CurvedAnimation(parent: animation, curve: AppMotion.standard, reverseCurve: AppMotion.emphasizedAccelerate);
-    return FadeTransition(opacity: fade, child: child);
-  }
-}
-
-class MotionPressable extends StatefulWidget {
-  const MotionPressable({
-    super.key,
-    required this.child,
-    this.onTap,
-    this.borderRadius,
-    this.scale = .975,
-  });
-
-  final Widget child;
-  final VoidCallback? onTap;
-  final BorderRadius? borderRadius;
-  final double scale;
-
-  @override
-  State<MotionPressable> createState() => _MotionPressableState();
-}
-
-class _MotionPressableState extends State<MotionPressable> {
-  bool _pressed = false;
-
-  void _setPressed(bool value) {
-    if (_pressed == value || !mounted) return;
-    setState(() => _pressed = value);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final radius = widget.borderRadius ?? AppShapes.large;
-    return MouseRegion(
-      cursor: widget.onTap == null ? SystemMouseCursors.basic : SystemMouseCursors.click,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapDown: widget.onTap == null ? null : (_) => _setPressed(true),
-        onTapCancel: widget.onTap == null ? null : () => _setPressed(false),
-        onTapUp: widget.onTap == null ? null : (_) => _setPressed(false),
-        onTap: widget.onTap,
-        child: AnimatedScale(
-          duration: AppMotion.fast,
-          curve: _pressed ? Curves.easeOutCubic : AppMotion.spring,
-          scale: _pressed ? widget.scale : 1,
-          child: ClipRRect(borderRadius: radius, child: widget.child),
-        ),
-      ),
-    );
-  }
-}
-
-class KoinlyScrollBehavior extends MaterialScrollBehavior {
-  const KoinlyScrollBehavior();
-
-  @override
-  Set<ui.PointerDeviceKind> get dragDevices => const {
-        ui.PointerDeviceKind.touch,
-        ui.PointerDeviceKind.mouse,
-        ui.PointerDeviceKind.trackpad,
-        ui.PointerDeviceKind.stylus,
-        ui.PointerDeviceKind.unknown,
-      };
-
-  @override
-  ScrollPhysics getScrollPhysics(BuildContext context) {
-    if (kIsDesktopApp) return const ClampingScrollPhysics();
-    return const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics());
-  }
-
-  @override
-  Widget buildScrollbar(BuildContext context, Widget child, ScrollableDetails details) {
-    return child;
-  }
-}
-
-ScrollPhysics optimizedScrollPhysics(BuildContext context) {
-  if (kIsDesktopApp) return const ClampingScrollPhysics();
-  return const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics());
-}
-
 class KoinlyApp extends StatelessWidget {
   const KoinlyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final themeMode = context.select<AppController, ThemeMode>((state) => state.themeMode);
+    final settings = context.select<AppController, ({ThemeMode themeMode, bool reducedMotion})>((state) => (themeMode: state.themeMode, reducedMotion: state.reducedMotion));
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       scrollBehavior: const KoinlyScrollBehavior(),
       title: appTitle,
-      themeMode: themeMode,
+      themeMode: settings.themeMode,
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),
       home: const StartupGate(),
@@ -4411,7 +3316,7 @@ class KoinlyApp extends StatelessWidget {
         final width = media.size.width;
         final maxScale = width < 360 ? 1.04 : width < 600 ? 1.14 : width < 900 ? 1.22 : 1.30;
         return MediaQuery(
-          data: media.copyWith(textScaler: media.textScaler.clamp(minScaleFactor: .90, maxScaleFactor: maxScale)),
+          data: media.copyWith(textScaler: media.textScaler.clamp(minScaleFactor: .90, maxScaleFactor: maxScale), disableAnimations: settings.reducedMotion || media.disableAnimations),
           child: child ?? const SizedBox.shrink(),
         );
       },
@@ -4892,47 +3797,6 @@ class _FinancialHealthReviewDialogState extends State<FinancialHealthReviewDialo
   }
 }
 
-class KoinlyAppIcon extends StatelessWidget {
-  const KoinlyAppIcon({super.key, this.size = 88, this.borderRadius});
-
-  final double size;
-  final double? borderRadius;
-
-  @override
-  Widget build(BuildContext context) {
-    final radius = borderRadius ?? size * .28;
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(radius),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(.22),
-            blurRadius: size * .18,
-            offset: Offset(0, size * .08),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(radius),
-        child: Image.asset(
-          'assets/icons/app_icon.png',
-          fit: BoxFit.cover,
-          filterQuality: FilterQuality.medium,
-          errorBuilder: (context, error, stackTrace) => DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(radius),
-              gradient: LinearGradient(colors: [Theme.of(context).colorScheme.primary, Theme.of(context).colorScheme.tertiary]),
-            ),
-            child: const Icon(Icons.account_balance_wallet_rounded, color: Colors.white),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class SplashScreen extends StatelessWidget {
   const SplashScreen({super.key});
 
@@ -5358,13 +4222,13 @@ class PageScaffold extends StatelessWidget {
     return Scaffold(
       backgroundColor: scheme.background,
       appBar: AppBar(
-        toolbarHeight: desktop ? 84 : small ? 68 : 76,
+        toolbarHeight: desktop ? 76 : small ? 68 : 76,
         titleSpacing: small ? 12 : 18,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).appBarTheme.titleTextStyle?.copyWith(fontSize: desktop ? 30 : small ? 23 : 27)),
+            Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).appBarTheme.titleTextStyle?.copyWith(fontSize: desktop ? 26 : small ? 23 : 27)),
             if (subtitle != null)
               Padding(
                 padding: const EdgeInsets.only(top: 2),
@@ -5562,43 +4426,53 @@ class ExpressiveCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final dark = Theme.of(context).brightness == Brightness.dark;
+    final reducedMotion = MediaQuery.of(context).disableAnimations;
     final baseColor = color ?? (dark ? scheme.surfaceContainer : Colors.white);
     final borderColor = dark ? Colors.white.withOpacity(.085) : scheme.outlineVariant.withOpacity(.74);
+    final decoration = BoxDecoration(
+      color: baseColor.withOpacity(dark ? .88 : 1),
+      gradient: surfaceTint && !reducedMotion
+          ? LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color.alphaBlend(kSleekAccent.withOpacity(dark ? .075 : .030), baseColor),
+                baseColor.withOpacity(dark ? .92 : 1),
+                Color.alphaBlend(scheme.tertiary.withOpacity(dark ? .035 : .022), baseColor),
+              ],
+            )
+          : null,
+      borderRadius: BorderRadius.circular(radius),
+      border: Border.all(color: borderColor, width: 1),
+      boxShadow: reducedMotion
+          ? [
+              if (!kIsDesktopApp) BoxShadow(color: Colors.black.withOpacity(dark ? .20 : .035), blurRadius: 10, offset: const Offset(0, 5)),
+            ]
+          : kIsDesktopApp
+              ? [
+                  BoxShadow(color: Colors.black.withOpacity(dark ? .20 : .025), blurRadius: 24, offset: const Offset(0, 12)),
+                  if (dark) BoxShadow(color: kSleekAccent.withOpacity(.045), blurRadius: 28, offset: const Offset(0, 2)),
+                ]
+              : [
+                  if (dark)
+                    BoxShadow(color: Colors.black.withOpacity(.32), blurRadius: 22, offset: const Offset(0, 12))
+                  else
+                    BoxShadow(color: scheme.shadow.withOpacity(.060), blurRadius: 18, offset: const Offset(0, 9)),
+                  if (dark) BoxShadow(color: kSleekAccent.withOpacity(.06), blurRadius: 26, offset: const Offset(0, 4)),
+                ],
+    );
+    final cardChild = ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: Padding(padding: padding, child: child),
+    );
+    if (reducedMotion) {
+      return Container(decoration: decoration, child: cardChild);
+    }
     return AnimatedContainer(
       duration: AppMotion.medium,
       curve: AppMotion.emphasized,
-      decoration: BoxDecoration(
-        color: baseColor.withOpacity(dark ? .88 : 1),
-        gradient: surfaceTint
-            ? LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  Color.alphaBlend(kSleekAccent.withOpacity(dark ? .075 : .030), baseColor),
-                  baseColor.withOpacity(dark ? .92 : 1),
-                  Color.alphaBlend(scheme.tertiary.withOpacity(dark ? .035 : .022), baseColor),
-                ],
-              )
-            : null,
-        borderRadius: BorderRadius.circular(radius),
-        border: Border.all(color: borderColor, width: 1),
-        boxShadow: kIsDesktopApp
-            ? [
-                BoxShadow(color: Colors.black.withOpacity(dark ? .20 : .025), blurRadius: 24, offset: const Offset(0, 12)),
-                if (dark) BoxShadow(color: kSleekAccent.withOpacity(.045), blurRadius: 28, offset: const Offset(0, 2)),
-              ]
-            : [
-                if (dark)
-                  BoxShadow(color: Colors.black.withOpacity(.32), blurRadius: 22, offset: const Offset(0, 12))
-                else
-                  BoxShadow(color: scheme.shadow.withOpacity(.060), blurRadius: 18, offset: const Offset(0, 9)),
-                if (dark) BoxShadow(color: kSleekAccent.withOpacity(.06), blurRadius: 26, offset: const Offset(0, 4)),
-              ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(radius),
-        child: Padding(padding: padding, child: child),
-      ),
+      decoration: decoration,
+      child: cardChild,
     );
   }
 }
@@ -5808,185 +4682,6 @@ class _SleekPillButton<T> extends StatelessWidget {
     );
   }
 }
-
-
-IconData iconFor(String name) {
-  switch (name) {
-    case 'wallet': return Icons.account_balance_wallet_rounded;
-    case 'credit_card': return Icons.credit_card_rounded;
-    case 'bank': return Icons.account_balance_rounded;
-    case 'savings': return Icons.savings_rounded;
-    case 'cash': return Icons.payments_rounded;
-    case 'atm': return Icons.atm_rounded;
-    case 'receipt': return Icons.receipt_long_rounded;
-    case 'calculator': return Icons.calculate_rounded;
-    case 'apparel': return Icons.checkroom_rounded;
-    case 'shopping_bag': return Icons.shopping_bag_rounded;
-    case 'cart': return Icons.shopping_cart_rounded;
-    case 'store': return Icons.storefront_rounded;
-    case 'food': return Icons.restaurant_rounded;
-    case 'groceries': return Icons.local_grocery_store_rounded;
-    case 'coffee': return Icons.local_cafe_rounded;
-    case 'fastfood': return Icons.fastfood_rounded;
-    case 'health': return Icons.health_and_safety_rounded;
-    case 'hospital': return Icons.local_hospital_rounded;
-    case 'medicine': return Icons.medication_rounded;
-    case 'favorite': return Icons.favorite_rounded;
-    case 'leisure': return Icons.pool_rounded;
-    case 'games': return Icons.sports_esports_rounded;
-    case 'movie': return Icons.movie_rounded;
-    case 'music': return Icons.music_note_rounded;
-    case 'sports': return Icons.sports_soccer_rounded;
-    case 'fitness': return Icons.fitness_center_rounded;
-    case 'book': return Icons.menu_book_rounded;
-    case 'school': return Icons.school_rounded;
-    case 'car': return Icons.directions_car_rounded;
-    case 'bus': return Icons.directions_bus_rounded;
-    case 'train': return Icons.train_rounded;
-    case 'flight': return Icons.flight_rounded;
-    case 'anime': return Icons.auto_awesome_rounded;
-    case 'manga': return Icons.auto_stories_rounded;
-    case 'collectibles': return Icons.toys_rounded;
-    case 'headphones': return Icons.headphones_rounded;
-    case 'keyboard': return Icons.keyboard_rounded;
-    case 'laptop': return Icons.laptop_mac_rounded;
-    case 'monitor': return Icons.desktop_windows_rounded;
-    case 'mic': return Icons.mic_rounded;
-    case 'video': return Icons.videocam_rounded;
-    case 'art': return Icons.brush_rounded;
-    case 'subscription': return Icons.subscriptions_rounded;
-    case 'fuel': return Icons.local_gas_station_rounded;
-    case 'home': return Icons.home_rounded;
-    case 'house': return Icons.house_rounded;
-    case 'apartment': return Icons.apartment_rounded;
-    case 'utilities': return Icons.lightbulb_rounded;
-    case 'water': return Icons.water_drop_rounded;
-    case 'wifi': return Icons.wifi_rounded;
-    case 'phone': return Icons.phone_android_rounded;
-    case 'bolt': return Icons.bolt_rounded;
-    case 'gift': return Icons.card_giftcard_rounded;
-    case 'celebration': return Icons.celebration_rounded;
-    case 'travel': return Icons.beach_access_rounded;
-    case 'pets': return Icons.pets_rounded;
-    case 'baby': return Icons.child_care_rounded;
-    case 'beauty': return Icons.face_retouching_natural_rounded;
-    case 'salary': return Icons.payments_rounded;
-    case 'work': return Icons.work_rounded;
-    case 'business': return Icons.business_center_rounded;
-    case 'investment': return Icons.trending_up_rounded;
-    case 'money': return Icons.attach_money_rounded;
-    case 'exchange': return Icons.currency_exchange_rounded;
-    case 'coupon': return Icons.confirmation_number_rounded;
-    case 'handshake': return Icons.handshake_rounded;
-    case 'donation': return Icons.volunteer_activism_rounded;
-    case 'security': return Icons.security_rounded;
-    case 'insurance': return Icons.policy_rounded;
-    case 'tools': return Icons.build_rounded;
-    case 'construction': return Icons.construction_rounded;
-    case 'cleaning': return Icons.cleaning_services_rounded;
-    case 'laundry': return Icons.local_laundry_service_rounded;
-    case 'parking': return Icons.local_parking_rounded;
-    case 'calendar': return Icons.calendar_month_rounded;
-    case 'time': return Icons.schedule_rounded;
-    case 'schedule': return Icons.schedule_rounded;
-    case 'camera_alt': return Icons.photo_camera_rounded;
-    case 'sports_esports': return Icons.sports_esports_rounded;
-    case 'filter': return Icons.filter_alt_rounded;
-    case 'today': return Icons.today_rounded;
-    case 'week': return Icons.view_week_rounded;
-    case 'month': return Icons.calendar_month_rounded;
-    case 'year': return Icons.event_note_rounded;
-    case 'all_time': return Icons.all_inclusive_rounded;
-    case 'custom_range': return Icons.date_range_rounded;
-    case 'theme_system': return Icons.devices_rounded;
-    case 'theme_light': return Icons.light_mode_rounded;
-    case 'theme_dark': return Icons.dark_mode_rounded;
-    case 'theme_battery': return Icons.battery_saver_rounded;
-    case 'flag': return Icons.flag_rounded;
-    case 'profile': return Icons.account_circle_rounded;
-    case 'loan_given': return Icons.call_made_rounded;
-    case 'loan_taken': return Icons.call_received_rounded;
-    case 'loan_received': return Icons.south_west_rounded;
-    case 'loan_paid': return Icons.north_east_rounded;
-    case 'warning': return Icons.warning_amber_rounded;
-    case 'reminder': return Icons.notifications_active_rounded;
-    case 'download': return Icons.system_update_alt_rounded;
-    default: return Icons.category_rounded;
-  }
-}
-bool isImageIcon(String name) => name == 'origami_bird';
-
-String imageIconAsset(String name) {
-  switch (name) {
-    case 'origami_bird':
-      return 'assets/icons/origami_bird.png';
-    default:
-      return '';
-  }
-}
-
-Widget iconGlyph(
-  BuildContext context,
-  String icon, {
-  required Color color,
-  required double size,
-  Color? imageBackground,
-}) {
-  if (isImageIcon(icon)) {
-    return Container(
-      width: size,
-      height: size,
-      padding: EdgeInsets.all(size * .10),
-      decoration: imageBackground == null || icon == 'origami_bird'
-          ? null
-          : BoxDecoration(
-              color: imageBackground,
-              borderRadius: BorderRadius.circular(size * .28),
-            ),
-      child: Image.asset(
-        imageIconAsset(icon),
-        width: size,
-        height: size,
-        fit: BoxFit.contain,
-        filterQuality: FilterQuality.medium,
-      ),
-    );
-  }
-  return Icon(iconFor(icon), color: color, size: size);
-}
-
-Widget iconBubble(BuildContext context, String icon, String color, {double size = 44}) {
-  final c = colorFromHex(color, fallback: Theme.of(context).colorScheme.primary);
-  final dark = Theme.of(context).brightness == Brightness.dark;
-  return Container(
-    width: size,
-    height: size,
-    decoration: BoxDecoration(
-      color: c.withOpacity(dark ? .20 : .16),
-      gradient: LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [
-          c.withOpacity(dark ? .26 : .18),
-          c.withOpacity(dark ? .10 : .08),
-        ],
-      ),
-      borderRadius: BorderRadius.circular(size * .32),
-      border: Border.all(color: c.withOpacity(dark ? .34 : .25), width: 1),
-      boxShadow: kIsDesktopApp ? null : [BoxShadow(color: c.withOpacity(.15), blurRadius: 14, offset: const Offset(0, 6))],
-    ),
-    child: Center(
-      child: iconGlyph(
-        context,
-        icon,
-        color: c,
-        size: size * .56,
-        imageBackground: Colors.white.withOpacity(.84),
-      ),
-    ),
-  );
-}
-
 
 
 class SelectionOption {
@@ -6623,8 +5318,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => MultiDeviceSyncScreen(
-          returnOnAuth: true,
+          completeOnAuth: !createAccount,
+          returnOnAuth: createAccount,
           initialRegisterMode: createAccount,
+          preferCloudDataOnAuth: !createAccount,
         ),
       ),
     );
@@ -6990,6 +5687,57 @@ class HomeDashboardScreen extends StatelessWidget {
         ),
     ];
 
+    final startEmptySection = <Widget>[
+      if (state.accounts.isEmpty) ...[
+        const SectionHeader('Start from empty'),
+        ExpressiveCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  iconBubble(context, 'wallet', '#78D8E8', size: 50),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('No accounts yet', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                        const SizedBox(height: 4),
+                        Text('Add an account, restore a backup, or sign in to replace this device with your cloud data.', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    onPressed: () => showAccountEditor(context, allowedTypes: const [AccountType.regular, AccountType.credit]),
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('Add account'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => runRestoreFlow(context, state),
+                    icon: const Icon(Icons.restore_rounded),
+                    label: const Text('Restore backup'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MultiDeviceSyncScreen(preferCloudDataOnAuth: true))),
+                    icon: const Icon(Icons.cloud_download_rounded),
+                    label: const Text('Sign in & restore cloud'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    ];
+
 
     return PageScaffold(
       title: 'Home',
@@ -7008,6 +5756,7 @@ class HomeDashboardScreen extends StatelessWidget {
                 children: [
                   balanceCard,
                   ...overdueLoanSection,
+                  ...startEmptySection,
                   ...accountsSection,
                   ...budgetSection,
                   ...categorySection,
@@ -7025,6 +5774,7 @@ class HomeDashboardScreen extends StatelessWidget {
                     children: [
                       balanceCard,
                       ...overdueLoanSection,
+                      ...startEmptySection,
                       ...accountsSection,
                       ...budgetSection,
                     ],
@@ -13065,7 +11815,7 @@ class SettingsScreen extends StatelessWidget {
             SettingsTile(icon: Icons.system_update_alt_rounded, title: 'Updates', subtitle: state.updateStatusMessage, color: '#00D7E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const UpdatesScreen()))),
             SettingsTile(icon: Icons.filter_alt_rounded, title: 'Default date filter', subtitle: _dateRangeLabel(state.dateRangeType), color: '#B4A5FF', onTap: () => showDateRangeSheet(context)),
             SettingsTile(icon: Icons.ios_share_rounded, title: 'Export', subtitle: 'CSV / PDF reports with current filters', color: '#FFB5D0', onTap: () => showExportSheet(context)),
-            SettingsTile(icon: Icons.tune_rounded, title: 'Advanced settings', subtitle: 'Defaults, reorder, app lock, backup', color: '#9AD0F5', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdvancedSettingsScreen()))),
+            SettingsTile(icon: Icons.tune_rounded, title: 'Advanced settings', subtitle: 'Defaults, performance, app lock, backup', color: '#9AD0F5', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdvancedSettingsScreen()))),
             SettingsTile(icon: Icons.info_rounded, title: 'About app', subtitle: 'Version, credits, licenses, and links', color: '#86E3CE', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AboutScreen()))),
           ],
         ),
@@ -13438,16 +12188,27 @@ class _WaveProgressIndicatorState extends State<WaveProgressIndicator> with Sing
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..repeat();
-    if (widget.progress >= 1) _controller.stop();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400));
+    if (widget.progress < 1) _controller.repeat();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncControllerState();
   }
 
   @override
   void didUpdateWidget(covariant WaveProgressIndicator oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.progress >= 1 && _controller.isAnimating) {
+    _syncControllerState();
+  }
+
+  void _syncControllerState() {
+    final reducedMotion = MediaQuery.of(context).disableAnimations;
+    if ((widget.progress >= 1 || reducedMotion) && _controller.isAnimating) {
       _controller.stop();
-    } else if (widget.progress < 1 && !_controller.isAnimating) {
+    } else if (widget.progress < 1 && !reducedMotion && !_controller.isAnimating) {
       _controller.repeat();
     }
   }
@@ -13460,15 +12221,21 @@ class _WaveProgressIndicatorState extends State<WaveProgressIndicator> with Sing
 
   @override
   Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.of(context).disableAnimations;
     return SizedBox(
       height: 92,
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, _) => CustomPaint(
-          painter: _WaveProgressPainter(progress: widget.progress, phase: _controller.value, color: kSleekAccent),
-          child: const SizedBox.expand(),
-        ),
-      ),
+      child: reducedMotion
+          ? CustomPaint(
+              painter: _WaveProgressPainter(progress: widget.progress, phase: 0, color: kSleekAccent),
+              child: const SizedBox.expand(),
+            )
+          : AnimatedBuilder(
+              animation: _controller,
+              builder: (context, _) => CustomPaint(
+                painter: _WaveProgressPainter(progress: widget.progress, phase: _controller.value, color: kSleekAccent),
+                child: const SizedBox.expand(),
+              ),
+            ),
     );
   }
 }
@@ -13609,11 +12376,13 @@ class MultiDeviceSyncScreen extends StatefulWidget {
     this.completeOnAuth = false,
     this.returnOnAuth = false,
     this.initialRegisterMode = false,
+    this.preferCloudDataOnAuth = false,
   });
 
   final bool completeOnAuth;
   final bool returnOnAuth;
   final bool initialRegisterMode;
+  final bool preferCloudDataOnAuth;
 
   @override
   State<MultiDeviceSyncScreen> createState() => _MultiDeviceSyncScreenState();
@@ -13654,11 +12423,11 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
     if (register) {
       await state.registerSyncAccount(email: _emailController.text, password: _passwordController.text);
     } else {
-      await state.loginSyncAccount(email: _emailController.text, password: _passwordController.text);
+      await state.loginSyncAccount(email: _emailController.text, password: _passwordController.text, preferCloudData: widget.preferCloudDataOnAuth);
     }
     if (mounted && state.cloudSyncError == null) {
       _passwordController.clear();
-      showSnack(context, register ? 'Account created. Sync started.' : 'Signed in. Sync started.');
+      showSnack(context, register ? 'Account created. Sync started.' : 'Signed in. Cloud data loaded.');
       if (widget.completeOnAuth) {
         await state.completeOnboarding();
         if (mounted) Navigator.pop(context);
@@ -13666,6 +12435,32 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
         if (mounted) Navigator.pop(context);
       }
     }
+  }
+
+  Future<void> _restoreCloudCopy() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Restore cloud copy?'),
+        content: const Text('This downloads the cloud data for this account and completely overwrites local accounts, categories, transactions, budgets, and hidden legacy loan data on this device.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Restore cloud')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final state = context.read<AppController>();
+    await state.syncFromCloud();
+    if (!mounted) return;
+    showSnack(context, state.cloudSyncError == null ? 'Cloud data restored to this device.' : state.cloudSyncError!);
+  }
+
+  Future<void> _uploadPendingChanges() async {
+    final state = context.read<AppController>();
+    await state.syncToCloud();
+    if (!mounted) return;
+    showSnack(context, state.cloudSyncError == null ? 'Local changes uploaded and cloud changes checked.' : state.cloudSyncError!);
   }
 
   @override
@@ -13774,9 +12569,14 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                 runSpacing: 10,
                 children: [
                   FilledButton.icon(
-                    onPressed: busy ? null : () => state.syncFromCloud(),
-                    icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.sync_rounded),
-                    label: const Text('Sync now'),
+                    onPressed: busy ? null : _restoreCloudCopy,
+                    icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.cloud_download_rounded),
+                    label: const Text('Restore cloud copy'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : _uploadPendingChanges,
+                    icon: const Icon(Icons.cloud_upload_rounded),
+                    label: const Text('Upload local changes'),
                   ),
                   OutlinedButton.icon(
                     onPressed: busy ? null : () => state.logoutSyncAccount(),
@@ -13806,7 +12606,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
               ),
             const SizedBox(height: 16),
             Text(
-              'Sync now downloads the cloud copy and fully replaces local finance data on this device. New local changes still upload automatically in the background. Local backup and restore remain separate safety tools.',
+              'Restore cloud copy downloads the account cloud data and fully replaces local finance data on this device. Upload local changes pushes pending edits, then checks cloud changes. Local backup and restore remain separate safety tools.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
             ),
           ],
@@ -15524,6 +14324,41 @@ class AdvancedSettingsScreen extends StatelessWidget {
                     width: 48,
                     height: 48,
                     decoration: BoxDecoration(
+                      color: colorFromHex('#00D7E8').withOpacity(.16),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: colorFromHex('#00D7E8').withOpacity(.20)),
+                    ),
+                    child: Icon(Icons.speed_rounded, color: colorFromHex('#00D7E8')),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Performance mode', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                        const SizedBox(height: 4),
+                        Text(
+                          kIsDesktopApp ? 'On by default on desktop. Reduces transitions, press animations, gradients, and heavy shadows.' : 'Reduces transitions, press animations, gradients, and heavy shadows.',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Switch(value: state.reducedMotion, onChanged: state.setReducedMotion),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: ExpressiveCard(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                children: [
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
                       color: colorFromHex('#9AD0F5').withOpacity(.16),
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(color: colorFromHex('#9AD0F5').withOpacity(.20)),
@@ -15551,7 +14386,228 @@ class AdvancedSettingsScreen extends StatelessWidget {
           ),
           SettingsTile(icon: Icons.backup_rounded, title: 'Backup', color: '#86E3CE', onTap: () => runBackupFlow(context, state)),
           SettingsTile(icon: Icons.restore_rounded, title: 'Restore', color: '#B4A5FF', onTap: () => runRestoreFlow(context, state)),
+          SettingsTile(
+            icon: Icons.fact_check_rounded,
+            title: 'Data health',
+            subtitle: state.dataHealthReport?.statusTitle ?? 'Check references, sync backlog, and setup leftovers',
+            color: '#00D7E8',
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const DataHealthScreen())),
+          ),
+          SettingsTile(
+            icon: Icons.health_and_safety_rounded,
+            title: 'Restore last safety backup',
+            subtitle: state.lastSafetyBackupLabel,
+            color: '#78D8E8',
+            onTap: state.hasLastSafetyBackup ? () => runRestoreLastSafetyBackupFlow(context, state) : null,
+          ),
         ]),
+      ),
+    );
+  }
+}
+
+class DataHealthScreen extends StatefulWidget {
+  const DataHealthScreen({super.key});
+
+  @override
+  State<DataHealthScreen> createState() => _DataHealthScreenState();
+}
+
+class _DataHealthScreenState extends State<DataHealthScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<AppController>().checkDataHealth();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppController>();
+    final report = state.dataHealthReport;
+    final busy = state.dataHealthBusy;
+    final statusColor = report == null
+        ? kSleekAccent
+        : report.hasErrors
+            ? kSleekExpense
+            : report.hasWarnings
+                ? const Color(0xFFFBC879)
+                : kSleekIncome;
+    return PageScaffold(
+      title: 'Data health',
+      subtitle: 'Safety checks for local data and sync',
+      child: ResponsiveContent(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ExpressiveCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      iconBubble(context, report?.hasErrors == true ? 'warning' : 'check', colorToHex(statusColor), size: 54),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(report?.statusTitle ?? 'Not checked yet', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                            const SizedBox(height: 4),
+                            Text(
+                              report == null ? 'Run a quick scan before blaming ghosts in the machine.' : report.statusBody,
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  FilledButton.icon(
+                    onPressed: busy ? null : () => context.read<AppController>().checkDataHealth(),
+                    icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.refresh_rounded),
+                    label: Text(busy ? 'Checking...' : 'Check again'),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: busy ? null : () => copyDiagnosticsReportFlow(context, context.read<AppController>()),
+                          icon: const Icon(Icons.copy_rounded),
+                          label: const Text('Copy report'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: busy ? null : () => shareDiagnosticsReportFlow(context, context.read<AppController>()),
+                          icon: const Icon(Icons.ios_share_rounded),
+                          label: const Text('Share'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            if (report != null) ...[
+              const SectionHeader('Snapshot'),
+              Row(
+                children: [
+                  Expanded(child: MiniMetric('Accounts', '${report.accountCount}', Icons.account_balance_wallet_rounded)),
+                  const SizedBox(width: 10),
+                  Expanded(child: MiniMetric('Transactions', '${report.transactionCount}', Icons.receipt_long_rounded)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(child: MiniMetric('Categories', '${report.categoryCount}', Icons.category_rounded)),
+                  const SizedBox(width: 10),
+                  Expanded(child: MiniMetric('Budgets', '${report.budgetCount}', Icons.savings_rounded)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(child: MiniMetric('Pending sync', '${report.pendingSyncOperations}', Icons.cloud_upload_rounded)),
+                  const SizedBox(width: 10),
+                  Expanded(child: MiniMetric('Sync conflicts', '${report.openSyncConflicts}', Icons.sync_problem_rounded)),
+                ],
+              ),
+              const SectionHeader('Findings'),
+              if (report.items.isEmpty)
+                const EmptyCard(
+                  icon: Icons.verified_rounded,
+                  title: 'Everything looks healthy',
+                  body: 'No broken references, sync conflicts, or skipped setup leftovers were found.',
+                )
+              else
+                ...report.items.map(
+                  (item) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: DataHealthFindingCard(item: item),
+                  ),
+                ),
+              if (report.skippedStarterPlaceholdersVisible) ...[
+                const SizedBox(height: 6),
+                FilledButton.icon(
+                  onPressed: busy
+                      ? null
+                      : () async {
+                          await context.read<AppController>().removeSkippedStarterAccountsFromHealthCheck();
+                          if (context.mounted) showSnack(context, 'Untouched starter accounts removed.');
+                        },
+                  icon: const Icon(Icons.cleaning_services_rounded),
+                  label: const Text('Remove skipped starter accounts'),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Text(
+                'Last checked ${DateFormat('MMM d, yyyy • h:mm a').format(report.checkedAt)}',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class DataHealthFindingCard extends StatelessWidget {
+  const DataHealthFindingCard({super.key, required this.item});
+
+  final DataHealthItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = switch (item.severity) {
+      DataHealthSeverity.error => kSleekExpense,
+      DataHealthSeverity.warning => const Color(0xFFFBC879),
+      DataHealthSeverity.info => kSleekAccent,
+    };
+    final icon = switch (item.severity) {
+      DataHealthSeverity.error => Icons.error_rounded,
+      DataHealthSeverity.warning => Icons.warning_amber_rounded,
+      DataHealthSeverity.info => Icons.info_rounded,
+    };
+    return ExpressiveCard(
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: color.withOpacity(.16),
+              borderRadius: BorderRadius.circular(15),
+              border: Border.all(color: color.withOpacity(.22)),
+            ),
+            child: Icon(icon, color: color),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(item.title, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 4),
+                Text(item.body, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700)),
+                if (item.actionLabel != null) ...[
+                  const SizedBox(height: 8),
+                  Text(item.actionLabel!, style: Theme.of(context).textTheme.labelLarge?.copyWith(color: color, fontWeight: FontWeight.w900)),
+                ],
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

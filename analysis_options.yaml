@@ -7,6 +7,12 @@ analyzer:
     - windows/**
     - macos/**
     - linux/**
+    - cloud/worker/node_modules/**
+    - cloud/worker/.wrangler/**
+    - cloud/worker/dist/**
+    - cloud/worker/build/**
+    - outputs/**
+    - package_phase*/**
   errors:
     deprecated_member_use: ignore
     prefer_const_declarations: ignore

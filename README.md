@@ -33,11 +33,32 @@ A local-first personal finance tracker built in Flutter with a polished Material
 | Sync backend | Cloudflare Worker API |
 | Cloud database | Turso, accessed only by the Worker |
 | Local sync state | SQLite outbox, cursor, entity versions, and conflict records |
-| Backup/restore | Local `.koinlybackup` files |
+| Backup/restore | Local `.koinlybackup` files plus automatic safety backups before destructive restores |
 | CI build | GitHub Actions for Android APKs and Windows installer |
 | Android outputs | Universal, ARM32, ARM64, x86_64 release APKs and Android App Bundle |
 | Windows output | `KoinlySetup.exe` |
 | License | Apache License 2.0 |
+
+---
+
+## Source structure
+
+The project is being gradually split out of the original large single-file Flutter build.
+
+- `lib/main.dart` still contains the app controller, persistence services, and most UI screens.
+- `lib/app_config.dart` contains app constants, feature flags, platform helpers, and shared visual constants.
+- `lib/branding_widgets.dart` contains reusable Koinly branding widgets, including the shared app icon.
+- `lib/collection_utils.dart` contains small collection extensions used by filtering and lookup flows.
+- `lib/icon_helpers.dart` contains shared icon lookup, custom-image icon handling, and reusable icon bubble rendering.
+- `lib/models.dart` contains finance enums, SQLite mapping models, date/color helpers, and data-health model types.
+- `lib/persistence_stores.dart` contains SharedPreferences and secure credential storage wrappers.
+- `lib/reminder_service.dart` contains local notification setup plus daily and hidden loan reminder scheduling.
+- `lib/sync_models.dart` contains shared sync exception/session data types.
+- `lib/sync_services.dart` contains legacy Cloudflare sync, account sync API client, and MongoDB snapshot sync helpers.
+- `lib/ui_foundation.dart` contains responsive breakpoints, shared motion/shape helpers, page transitions, pressable behavior, and scroll physics.
+- `lib/update_service.dart` contains the GitHub Releases updater, semantic versioning, changelog parsing, asset matching, download state, and Android installer helpers.
+
+This staged split keeps behavior stable while making future analyzer, editor, and performance work less painful.
 
 ---
 
@@ -88,6 +109,60 @@ Release notes come from `CHANGELOG.md`. The workflow first looks for the current
 - Background online sync uses incremental pulls and avoids global busy-state rebuilds; manual sync/sign-in can still fully overwrite local finance data when required.
 - Small icon images use medium filtering to reduce GPU work while scrolling.
 - Page transitions now use shorter fade-only motion, and the heavy background glow layers were removed to reduce animation jank on both Windows and Android.
+- Advanced settings includes Performance mode. It is enabled by default on desktop and reduces page transitions, press animations, animated card changes, update-wave animation, gradients, and heavy shadows.
+- Desktop page headers are slightly more compact than mobile headers so Windows layouts feel less oversized.
+
+---
+
+## Data safety
+
+- Manual backup restore creates a local safety backup before importing the selected `.koinlybackup`.
+- Restore cloud copy and setup-login cloud overwrite download the cloud copy first, then create a safety backup, then replace local finance data.
+- Server reset sync operations also create a safety backup before clearing local finance data.
+- Legacy online cloud restore also creates a safety backup before replacing local data.
+- The app keeps the newest 3 safety backups in local app storage.
+- **Advanced settings → Restore last safety backup** reopens the latest safety backup if a restore/cloud-overwrite needs to be undone.
+- Restored data is automatically marked as the local source of truth and uploads to cloud sync when the user is signed in.
+
+---
+
+## Data health diagnostics
+
+Koinly includes **Advanced settings → Data health** for quick local diagnostics.
+
+The health check reports:
+
+- account, category, transaction, and budget counts
+- pending cloud-sync upload operations
+- unresolved sync conflicts
+- transactions pointing to missing accounts
+- transactions pointing to missing categories
+- budgets with missing account/category selections
+- skipped setup starter-account leftovers
+
+The page is mostly read-only. Its only repair action removes untouched Cash/Card/Bank Account starter placeholders when the user already chose to skip account setup.
+
+Data health can also build a privacy-safe diagnostics report. The report can be copied or shared and includes app version, platform, setup state, local data counts, sync status, pending uploads, conflicts, update state, and health findings without including auth tokens or database credentials.
+
+---
+
+## Validation and packaging
+
+Koinly includes local helper scripts for repeatable validation and clean ZIP handoff.
+
+- `analysis_options.yaml` excludes generated Worker dependency/cache folders and package-output folders from Dart analysis.
+- `.gitignore` keeps Flutter/Android/Windows build outputs, Worker `node_modules`, Wrangler cache, environment files, ZIPs, logs, and local output folders out of source packages.
+- Run `tool\validate_project.ps1` to execute `flutter pub get`, `flutter analyze --fatal-infos`, and `flutter test`.
+- The validation helper supports `-PubGetTimeoutSeconds`, `-AnalyzeTimeoutSeconds`, and `-TestTimeoutSeconds`, plus `-SkipPubGet`, `-SkipAnalyze`, and `-SkipTests` for targeted checks.
+- Run `tool\package_project.ps1 -OutputPath C:\path\Koinly-clean.zip` to create a clean project ZIP.
+- Clean packages intentionally exclude `cloud\worker\node_modules`, build folders, caches, temporary outputs, and generated logs so the ZIP stays small and uploadable.
+- If analyzer timeouts continue, the next structural fix is to split the current large `lib\main.dart` into smaller feature files so Dart analysis can resolve the app incrementally.
+- Phase 8 started that split by moving shared app config/constants and finance models out of `lib\main.dart`.
+- Phase 9 continued the split by moving reusable UI foundation primitives out of `lib\main.dart`.
+- Phase 10 continued the split by moving preference/credential stores and sync data types out of `lib\main.dart`.
+- Phase 11 continued the split by moving reminder scheduling and sync network/database helper services out of `lib\main.dart`.
+- Phase 12 continued the split by moving reusable branding and collection utility code out of `lib\main.dart`.
+- Phase 13 continued the split by moving reusable icon lookup/rendering helpers out of `lib\main.dart`.
 
 ---
 
@@ -108,6 +183,17 @@ Added for the current app:
 - automatic GitHub Actions version stamping
 - Windows title/executable branding as `Koinly`
 - Material 3 Expressive UI behavior
+- automatic safety backups before destructive restore/cloud-overwrite operations
+- Advanced settings Data health diagnostics
+- privacy-safe copy/share diagnostics report
+- validation/package scripts and clean source ZIP generation
+- validation timeout controls for slow local analyzer/pub/test runs
+- Phase 8 source split with `lib/app_config.dart` and `lib/models.dart`
+- Phase 9 source split with `lib/ui_foundation.dart`
+- Phase 10 source split with `lib/persistence_stores.dart` and `lib/sync_models.dart`
+- Phase 11 source split with `lib/reminder_service.dart` and `lib/sync_services.dart`
+- Phase 12 source split with `lib/branding_widgets.dart` and `lib/collection_utils.dart`
+- Phase 13 source split with `lib/icon_helpers.dart`
 - onboarding login/create-account actions
 - onboarding skip-accounts flow that removes untouched starter accounts
 - Hidden Settings naming
@@ -179,7 +265,7 @@ Koinly supports CSV export, PDF export, filter-aware export data, shared export 
 
 ### Settings
 
-Settings includes theme, currency, currency symbol/code, prefix/suffix placement, number separators, daily reminder time, default account, default expense category, default income category, default date filter, Savings suggestion profile, backup/restore, app lock/security, About, privacy policy, terms, and licenses.
+Settings includes theme, currency, currency symbol/code, prefix/suffix placement, number separators, daily reminder time, default account, default expense category, default income category, default date filter, Savings suggestion profile, backup/restore, app lock/security, Account & sync, Updates, About, privacy policy, terms, and licenses.
 
 ### Hidden Settings
 
@@ -198,15 +284,34 @@ The active user flow is:
 3. Create an account or sign in.
 4. Continue using Koinly normally.
 
-During first setup, Login/Create account returns to the setup pages after
-authentication. Setup is completed only when the final setup Start button is
-pressed, so account creation no longer skips the rest of onboarding.
+During first setup, Login signs in, downloads the cloud copy as the source of
+truth, overwrites local setup/default finance data, completes setup, and opens
+the app. Create account still returns to the setup pages after authentication
+so a new user can finish local setup before adopting the device data into the
+new cloud account.
+
+The Accounts setup page can also be skipped for fully empty local use. Skipping
+accounts removes the untouched Cash, Card, and Bank Account placeholders, saves
+that choice locally, and cleans those placeholders again if an older install,
+seed step, or sync pass tries to bring back the exact untouched starter set.
 
 The Cloudflare Worker URL is embedded at build time through the GitHub
 Actions/Flutter define `KOINLY_SYNC_API_BASE_URL`; it is not shown as an app
 setting.
 
 Normal app operations save to local SQLite first, update the UI immediately, and add an operation to the local `sync_outbox`. The background coordinator batches pending operations, pushes them to the Worker, pulls remote changes by server cursor, and applies them locally.
+
+Account & sync separates destructive and non-destructive actions:
+
+- **Restore cloud copy** downloads the account cloud data and fully overwrites
+  local finance data on this device after confirmation.
+- **Upload local changes** pushes pending local edits and then checks cloud
+  changes.
+
+Sync status uses explicit stages such as checking local changes, downloading
+cloud copy, overwriting local data, applying cloud changes, synced, pending,
+and error states. The last successful sync timestamp is shown with the sync
+card/status.
 
 Backup restore is intentionally stronger than a normal incremental edit. After
 restore, Koinly uploads the restored local data as an authoritative cloud
@@ -227,6 +332,9 @@ The older manual snapshot-style sync code and `backend/cloudflare-turso/` refere
 ## Backup and restore
 
 Backup files use `.koinlybackup`. Backup includes local app data and preferences. Restore replaces local data with backup contents. Local-only use does not require a sync account. If a sync account is signed in, restore automatically uploads the restored copy to cloud sync; if not signed in, the upload remains pending until sync is configured.
+
+When Koinly starts with no accounts, Home shows quick recovery actions for
+adding an account, restoring a backup, or signing in to restore the cloud copy.
 
 ---
 
