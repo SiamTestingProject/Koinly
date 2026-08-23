@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed setup-page account create/login so it returns to setup instead of completing onboarding early and bouncing back later.
+- Restore now automatically schedules an authoritative cloud upload when signed in, so restored data becomes the cloud source of truth.
+- Added account-sync replace support so other devices fully clear local finance data before applying a restored cloud copy.
 - Removed the Home Quick actions block for a cleaner dashboard.
 - Fixed the onboarding account setup Skip action so untouched starter accounts are removed instead of staying in the app.
 - Reduced route/tab motion and expensive background glow layers for smoother Android and Windows performance.

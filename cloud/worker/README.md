@@ -15,6 +15,7 @@ secrets and are never shipped in the app.
 - `POST /v1/auth/logout`
 - `POST /v1/sync/initial`
 - `POST /v1/sync/push`
+- `POST /v1/sync/replace`
 - `GET /v1/sync/pull?cursor=0&limit=100`
 - `GET /v1/sync/status`
 
@@ -97,6 +98,11 @@ are caused by missing Worker secrets, invalid Turso credentials, or not applying
 Clients write local SQLite first, enqueue entity operations in `sync_outbox`,
 then push batches. The server deduplicates by `operationId`, stores current
 entity state, and appends `sync_changes`. Clients pull by monotonic sequence.
+
+`POST /v1/sync/replace` is reserved for backup restore. It clears the user's
+server-side current entity state, appends a `__reset__` change marker, then
+adds the restored entity rows. Updated clients clear local finance data when
+they receive the reset marker before applying the restored cloud copy.
 
 Financial correctness is protected by:
 

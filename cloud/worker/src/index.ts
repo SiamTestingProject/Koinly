@@ -132,6 +132,7 @@ export default {
       if (request.method === 'POST' && url.pathname === '/v1/auth/logout') return await logout(request, db, auth);
       if (request.method === 'POST' && url.pathname === '/v1/sync/initial') return await initialSync(request, db, auth);
       if (request.method === 'POST' && url.pathname === '/v1/sync/push') return await push(request, env, db, auth);
+      if (request.method === 'POST' && url.pathname === '/v1/sync/replace') return await replaceAll(request, env, db, auth);
       if (request.method === 'GET' && url.pathname === '/v1/sync/pull') return await pull(url, env, db, auth);
       if (request.method === 'GET' && url.pathname === '/v1/sync/status') return await status(db, auth);
 
@@ -159,6 +160,7 @@ function rootResponse(env: Env): Response {
       logout: 'POST /v1/auth/logout',
       initialSync: 'POST /v1/sync/initial',
       push: 'POST /v1/sync/push',
+      replace: 'POST /v1/sync/replace',
       pull: 'GET /v1/sync/pull?cursor=0&limit=100',
       status: 'GET /v1/sync/status',
     },
@@ -350,6 +352,64 @@ async function push(request: Request, env: Env, db: Client, auth: AuthContext): 
   return pushWithOperations(db, auth, body.operations, numberEnv(env.MAX_SYNC_BATCH_SIZE, 100));
 }
 
+async function replaceAll(request: Request, env: Env, db: Client, auth: AuthContext): Promise<Response> {
+  const body = await readJson(request);
+  const rawOperations = body.operations;
+  if (!Array.isArray(rawOperations)) throw new HttpError(400, 'operations must be an array.');
+  const maxBatch = Math.max(numberEnv(env.MAX_SYNC_BATCH_SIZE, 100), 1000);
+  if (rawOperations.length > maxBatch) throw new HttpError(413, `Replace limit is ${maxBatch} operations.`);
+
+  const operations = rawOperations.map(validateOperation).filter(op => op.operation === 'upsert');
+  const now = Date.now();
+  const resetOperationId = crypto.randomUUID();
+  const accepted: Array<{ operationId: string; entityType: string; entityId: string; sequence: number; version: number }> = [];
+
+  await db.execute({ sql: 'DELETE FROM sync_entities WHERE user_id = ?', args: [auth.userId] });
+  await db.execute({
+    sql: `INSERT INTO sync_changes(user_id, entity_type, entity_id, operation, version, payload_json, device_id, operation_id, changed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [auth.userId, '__reset__', 'finance', 'delete', 0, null, auth.deviceId, resetOperationId, now],
+  });
+  const resetSequenceRow = (await db.execute({
+    sql: 'SELECT sequence FROM sync_changes WHERE user_id = ? AND operation_id = ?',
+    args: [auth.userId, resetOperationId],
+  })).rows[0];
+  await db.execute({
+    sql: 'INSERT INTO processed_operations(user_id, operation_id, sequence, created_at) VALUES (?, ?, ?, ?)',
+    args: [auth.userId, resetOperationId, Number(resetSequenceRow?.sequence ?? 0), now],
+  });
+
+  for (const op of operations) {
+    const version = 1;
+    const payloadJson = JSON.stringify(op.payload ?? {});
+    await db.batch([
+      {
+        sql: `INSERT INTO sync_entities(user_id, entity_type, entity_id, version, payload_json, deleted_at, updated_at, last_operation_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [auth.userId, op.entityType, op.entityId, version, payloadJson, null, now, op.operationId],
+      },
+      {
+        sql: `INSERT INTO sync_changes(user_id, entity_type, entity_id, operation, version, payload_json, device_id, operation_id, changed_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [auth.userId, op.entityType, op.entityId, 'upsert', version, payloadJson, auth.deviceId, op.operationId, now],
+      },
+    ], 'write');
+    const sequenceRow = (await db.execute({
+      sql: 'SELECT sequence FROM sync_changes WHERE user_id = ? AND operation_id = ?',
+      args: [auth.userId, op.operationId],
+    })).rows[0];
+    const sequence = Number(sequenceRow?.sequence ?? 0);
+    await db.execute({
+      sql: 'INSERT INTO processed_operations(user_id, operation_id, sequence, created_at) VALUES (?, ?, ?, ?)',
+      args: [auth.userId, op.operationId, sequence, now],
+    });
+    accepted.push({ operationId: op.operationId, entityType: op.entityType, entityId: op.entityId, sequence, version });
+  }
+
+  const cursor = await maxSequence(db, auth);
+  return json({ ok: true, mode: 'replace', cursor, accepted });
+}
+
 async function pushWithOperations(db: Client, auth: AuthContext, rawOperations: unknown, maxBatch: number): Promise<Response> {
   if (!Array.isArray(rawOperations)) throw new HttpError(400, 'operations must be an array.');
   if (rawOperations.length > maxBatch) throw new HttpError(413, `Batch limit is ${maxBatch} operations.`);
@@ -448,8 +508,12 @@ async function pull(url: URL, env: Env, db: Client, auth: AuthContext): Promise<
 
 async function status(db: Client, auth: AuthContext): Promise<Response> {
   await db.execute({ sql: 'UPDATE devices SET last_seen_at = ? WHERE user_id = ? AND id = ?', args: [Date.now(), auth.userId, auth.deviceId] });
+  return json({ ok: true, serverCursor: await maxSequence(db, auth), userId: auth.userId, deviceId: auth.deviceId });
+}
+
+async function maxSequence(db: Client, auth: AuthContext): Promise<number> {
   const row = (await db.execute({ sql: 'SELECT COALESCE(MAX(sequence), 0) AS sequence FROM sync_changes WHERE user_id = ?', args: [auth.userId] })).rows[0];
-  return json({ ok: true, serverCursor: Number(row?.sequence ?? 0), userId: auth.userId, deviceId: auth.deviceId });
+  return Number(row?.sequence ?? 0);
 }
 
 async function issueTokens(env: Env, db: Client, auth: AuthContext): Promise<Response> {

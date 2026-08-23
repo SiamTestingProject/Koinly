@@ -1179,10 +1179,11 @@ class KoinlyDatabase {
 
   Future<void> deleteAccount(String id) async => (await db).delete('accounts', where: 'id = ?', whereArgs: [id]);
 
-  Future<void> deleteUntouchedStarterAccounts() async {
+  Future<List<String>> deleteUntouchedStarterAccounts() async {
     final database = await db;
     final starterNames = const {'Cash', 'Card', 'Bank Account'};
     final rows = await database.query('accounts');
+    final deletedIds = <String>[];
     await database.transaction((txn) async {
       for (final row in rows) {
         final account = Account.fromMap(row);
@@ -1207,9 +1208,11 @@ class KoinlyDatabase {
             0;
         if (transactionReferences == 0 && budgetReferences == 0 && loanReferences == 0) {
           await txn.delete('accounts', where: 'id = ?', whereArgs: [account.id]);
+          deletedIds.add(account.id);
         }
       }
     });
+    return deletedIds;
   }
 
   Future<void> reorderAccounts(List<Account> ordered) async {
@@ -1631,6 +1634,47 @@ class KoinlyDatabase {
     await enqueuePreferences(preferences);
   }
 
+  Future<List<Map<String, dynamic>>> fullReplacementOperations(Map<String, dynamic> preferences) async {
+    final database = await db;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final operations = <Map<String, dynamic>>[];
+    for (final table in syncTables) {
+      final rows = await database.query(table);
+      for (final row in rows) {
+        final entityId = _entityIdForRow(table, row);
+        if (entityId.isEmpty) continue;
+        operations.add({
+          'operationId': _uuid.v4(),
+          'entityType': table,
+          'entityId': entityId,
+          'operation': 'upsert',
+          'payload': row,
+          'baseVersion': 0,
+          'clientUpdatedAt': now,
+        });
+      }
+    }
+    operations.add({
+      'operationId': _uuid.v4(),
+      'entityType': 'preferences',
+      'entityId': 'koinly',
+      'operation': 'upsert',
+      'payload': preferences,
+      'baseVersion': 0,
+      'clientUpdatedAt': now,
+    });
+    return operations;
+  }
+
+  Future<void> resetLocalSyncTracking() async {
+    final database = await db;
+    await database.transaction((txn) async {
+      await txn.delete('sync_outbox');
+      await txn.delete('sync_entity_versions');
+      await txn.delete('sync_conflicts');
+    });
+  }
+
   Future<void> enqueueSyncOperation({
     required String entityType,
     required String entityId,
@@ -1701,6 +1745,9 @@ class KoinlyDatabase {
   }
 
   Future<void> applyRemoteChanges(List<Map<String, dynamic>> changes, Future<void> Function(Map<String, dynamic>) applyPreferences) async {
+    if (changes.any((change) => change['entityType'] == '__reset__')) {
+      await clearFinanceDataForRemoteLogin();
+    }
     final database = await db;
     await database.transaction((txn) async {
       for (final change in changes) {
@@ -1708,6 +1755,7 @@ class KoinlyDatabase {
         final entityId = change['entityId'] as String? ?? '';
         final operation = change['operation'] as String? ?? '';
         final version = (change['version'] as num? ?? 0).toInt();
+        if (entityType == '__reset__') continue;
         if (entityType == 'preferences') continue;
         if (!syncTables.contains(entityType) || entityId.isEmpty) continue;
         if (operation == 'delete') {
@@ -2042,14 +2090,15 @@ class BackupService {
     return source.copy(target.path);
   }
 
-  static Future<void> restoreBackup(AppController state) async {
+  static Future<bool> restoreBackup(AppController state) async {
     final picked = await FilePicker.platform.pickFiles(type: FileType.any);
-    if (picked == null || picked.files.single.path == null) return;
+    if (picked == null || picked.files.single.path == null) return false;
     final encrypted = await File(picked.files.single.path!).readAsString();
     final payload = jsonDecode(_decrypt(encrypted)) as Map<String, dynamic>;
     await state.database.importAll((payload['database'] as Map).cast<String, dynamic>());
     await state.importPreferences((payload['preferences'] as Map? ?? {}).cast<String, dynamic>());
     await state.reload();
+    return true;
   }
 }
 
@@ -2251,6 +2300,10 @@ class KoinlySyncApi {
 
   Future<Map<String, dynamic>> push({required String accessToken, required List<Map<String, dynamic>> operations}) {
     return _post('/v1/sync/push', {'operations': operations}, accessToken: accessToken);
+  }
+
+  Future<Map<String, dynamic>> replaceAll({required String accessToken, required List<Map<String, dynamic>> operations}) {
+    return _post('/v1/sync/replace', {'operations': operations}, accessToken: accessToken);
   }
 
   Future<Map<String, dynamic>> pull({required String accessToken, required int cursor, int limit = 100}) {
@@ -2499,9 +2552,14 @@ Future<void> runBackupFlow(BuildContext context, AppController state) async {
 
 Future<void> runRestoreFlow(BuildContext context, AppController state) async {
   try {
-    await BackupService.restoreBackup(state);
+    final restored = await BackupService.restoreBackup(state);
+    if (!restored) return;
+    await state.markRestoredDataForCloudUpload();
     if (context.mounted) {
-      showSnack(context, 'Restore complete. Restart the app if any screen looks stale.');
+      showSnack(
+        context,
+        state.cloudSyncEnabled ? 'Restore complete. Restored data is uploading to cloud sync.' : 'Restore complete. Sign in to sync to upload it to cloud.',
+      );
     }
   } catch (_) {
     if (context.mounted) {
@@ -2589,6 +2647,7 @@ class AppController extends ChangeNotifier {
   String syncTursoAuthToken = '';
   bool cloudSyncBusy = false;
   bool cloudSyncPending = false;
+  bool authoritativeCloudUploadPending = false;
   String? cloudSyncError;
   String? cloudSyncErrorCode;
   DateTime? cloudSyncLastAt;
@@ -2729,6 +2788,7 @@ class AppController extends ChangeNotifier {
     final lastSyncRaw = await prefs.getString('cloudSyncLastAt', '');
     cloudSyncLastAt = lastSyncRaw.isEmpty ? null : DateTime.tryParse(lastSyncRaw);
     cloudSyncPending = await prefs.getBool('cloudSyncPending', false);
+    authoritativeCloudUploadPending = await prefs.getBool('authoritativeCloudUploadPending', false);
     syncStatus = cloudSyncEnabled ? cloudSyncStatusText : 'Offline';
     pendingAndroidUpdatePath = await prefs.getString('pendingAndroidUpdatePath', '');
     pendingAndroidUpdateVersion = await prefs.getString('pendingAndroidUpdateVersion', '');
@@ -2740,8 +2800,6 @@ class AppController extends ChangeNotifier {
   }
 
   Future<Map<String, dynamic>> exportPreferences() async => {
-        'onboardingCompleted': onboardingCompleted,
-        'desktopSetupVersionCompleted': desktopSetupVersionCompleted,
         'themePreference': enumName(themePreference),
         'currencySymbol': currencySymbol,
         'currencyCode': currencyCode,
@@ -2774,7 +2832,21 @@ class AppController extends ChangeNotifier {
 
   Future<void> importPreferences(Map<String, dynamic> data) async {
     final sp = await prefs.prefs;
+    const deviceLocalKeys = {
+      'onboardingCompleted',
+      'desktopSetupVersionCompleted',
+      'cloudSyncEnabled',
+      'cloudSyncPending',
+      'authoritativeCloudUploadPending',
+      'cloudSyncLastAt',
+      'cloudSyncApiBaseUrl',
+      'cloudSyncId',
+      'cloudSyncPin',
+      'syncAccountEmail',
+      'syncDeviceId',
+    };
     for (final entry in data.entries) {
+      if (deviceLocalKeys.contains(entry.key)) continue;
       final value = entry.value;
       if (entry.key == 'savingsSuggestionProfile' && value is Map) {
         await sp.setString(entry.key, jsonEncode(value.cast<String, dynamic>()));
@@ -3250,6 +3322,10 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> syncToCloud({bool force = false, bool silent = false}) async {
+    if (authoritativeCloudUploadPending) {
+      await uploadAuthoritativeCloudData(silent: silent);
+      return;
+    }
     await performMultiDeviceSync(silent: silent);
   }
 
@@ -3281,7 +3357,9 @@ class AppController extends ChangeNotifier {
           : await api.login(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName());
       await _saveSyncSession(session);
       await database.writeSyncState('serverCursor', '0');
-      if (register) {
+      if (authoritativeCloudUploadPending) {
+        await uploadAuthoritativeCloudData(silent: true);
+      } else if (register) {
         await database.enqueueAllForAdoption(await exportPreferences());
         await performMultiDeviceSync(silent: true);
       } else {
@@ -3444,6 +3522,80 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  Future<void> markRestoredDataForCloudUpload() async {
+    authoritativeCloudUploadPending = true;
+    await prefs.setBool('authoritativeCloudUploadPending', true);
+    await _setCloudSyncPending(true);
+    if (_hasConfiguredSyncTarget()) {
+      await uploadAuthoritativeCloudData();
+    } else {
+      syncStatus = 'Restore complete • Sign in to upload restored data';
+      notifyListeners();
+    }
+  }
+
+  Future<void> uploadAuthoritativeCloudData({bool silent = false}) async {
+    if (_syncInProgress || cloudSyncBusy || !_hasConfiguredSyncTarget()) {
+      if (!_hasConfiguredSyncTarget()) {
+        syncStatus = 'Restore complete • Sign in to upload restored data';
+        notifyListeners();
+      }
+      return;
+    }
+    _syncInProgress = true;
+    cloudSyncBusy = !silent;
+    if (!silent) {
+      cloudSyncError = null;
+      cloudSyncErrorCode = null;
+      syncStatus = 'Uploading restored data...';
+      notifyListeners();
+    }
+    try {
+      final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
+      final operations = await database.fullReplacementOperations(await exportPreferences());
+      final response = await api.replaceAll(accessToken: syncAccessToken, operations: operations);
+      await database.resetLocalSyncTracking();
+      final accepted = (response['accepted'] as List? ?? const []).cast<Map>();
+      for (final item in accepted) {
+        final entityType = item['entityType']?.toString() ?? '';
+        final entityId = item['entityId']?.toString() ?? '';
+        if (entityType.isEmpty || entityId.isEmpty) continue;
+        await database.saveEntityVersion(entityType, entityId, (item['version'] as num? ?? 0).toInt());
+      }
+      await database.writeSyncState('serverCursor', '${(response['cursor'] as num? ?? 0).toInt()}');
+      authoritativeCloudUploadPending = false;
+      await prefs.setBool('authoritativeCloudUploadPending', false);
+      await _setCloudSyncPending(false);
+      cloudSyncLastAt = DateTime.now();
+      await prefs.setString('cloudSyncLastAt', cloudSyncLastAt!.toIso8601String());
+      cloudSyncError = null;
+      cloudSyncErrorCode = null;
+      syncStatus = 'Synced';
+    } catch (error) {
+      final text = _cleanSyncError(error);
+      if (text.toLowerCase().contains('expired') || text.toLowerCase().contains('access token')) {
+        await _refreshSyncSession();
+        _syncInProgress = false;
+        cloudSyncBusy = false;
+        await uploadAuthoritativeCloudData(silent: silent);
+        return;
+      }
+      authoritativeCloudUploadPending = true;
+      await prefs.setBool('authoritativeCloudUploadPending', true);
+      await _setCloudSyncPending(true);
+      _schedulePendingSyncRetry();
+      if (!silent) {
+        cloudSyncError = text;
+        cloudSyncErrorCode = error is CloudSyncException ? error.code : null;
+      }
+      syncStatus = 'Restore upload pending';
+    } finally {
+      _syncInProgress = false;
+      cloudSyncBusy = false;
+      notifyListeners();
+    }
+  }
+
   Map<String, dynamic> _operationFromOutboxRow(Map<String, Object?> row) {
     final payloadRaw = row['payload_json']?.toString();
     return {
@@ -3487,7 +3639,7 @@ class AppController extends ChangeNotifier {
   void _schedulePendingSyncRetry({bool immediate = false}) {
     if (!_hasConfiguredSyncTarget()) return;
     if (immediate && cloudSyncPending && !cloudSyncBusy) {
-      unawaited(syncToCloud(silent: true));
+      unawaited(authoritativeCloudUploadPending ? uploadAuthoritativeCloudData(silent: true) : syncToCloud(silent: true));
     }
     _cloudSyncRetryTimer ??= Timer.periodic(const Duration(seconds: 30), (_) {
       if (!cloudSyncPending) {
@@ -3496,7 +3648,7 @@ class AppController extends ChangeNotifier {
         return;
       }
       if (!cloudSyncBusy && _hasConfiguredSyncTarget()) {
-        unawaited(syncToCloud(silent: true));
+        unawaited(authoritativeCloudUploadPending ? uploadAuthoritativeCloudData(silent: true) : syncToCloud(silent: true));
       }
     });
   }
@@ -3566,13 +3718,16 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> skipStarterAccounts() async {
-    await database.deleteUntouchedStarterAccounts();
+    final deletedStarterAccountIds = await database.deleteUntouchedStarterAccounts();
+    for (final accountId in deletedStarterAccountIds) {
+      await database.enqueueDelete('accounts', accountId);
+    }
     final remainingAccounts = await database.accounts();
     if (defaultAccountId != null && !remainingAccounts.any((account) => account.id == defaultAccountId)) {
       defaultAccountId = remainingAccounts.where((a) => a.type != AccountType.savings).firstOrNull?.id ?? remainingAccounts.firstOrNull?.id;
       await prefs.setString('defaultAccountId', defaultAccountId ?? '');
     }
-    await reload(queueSync: false);
+    await reload(queueSync: deletedStarterAccountIds.isNotEmpty);
   }
 
   Future<bool> authenticate() async {
@@ -6468,7 +6623,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => MultiDeviceSyncScreen(
-          completeOnAuth: true,
+          returnOnAuth: true,
           initialRegisterMode: createAccount,
         ),
       ),
@@ -13452,10 +13607,12 @@ class MultiDeviceSyncScreen extends StatefulWidget {
   const MultiDeviceSyncScreen({
     super.key,
     this.completeOnAuth = false,
+    this.returnOnAuth = false,
     this.initialRegisterMode = false,
   });
 
   final bool completeOnAuth;
+  final bool returnOnAuth;
   final bool initialRegisterMode;
 
   @override
@@ -13504,6 +13661,8 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
       showSnack(context, register ? 'Account created. Sync started.' : 'Signed in. Sync started.');
       if (widget.completeOnAuth) {
         await state.completeOnboarding();
+        if (mounted) Navigator.pop(context);
+      } else if (widget.returnOnAuth) {
         if (mounted) Navigator.pop(context);
       }
     }

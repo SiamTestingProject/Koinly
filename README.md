@@ -198,11 +198,21 @@ The active user flow is:
 3. Create an account or sign in.
 4. Continue using Koinly normally.
 
+During first setup, Login/Create account returns to the setup pages after
+authentication. Setup is completed only when the final setup Start button is
+pressed, so account creation no longer skips the rest of onboarding.
+
 The Cloudflare Worker URL is embedded at build time through the GitHub
 Actions/Flutter define `KOINLY_SYNC_API_BASE_URL`; it is not shown as an app
 setting.
 
 Normal app operations save to local SQLite first, update the UI immediately, and add an operation to the local `sync_outbox`. The background coordinator batches pending operations, pushes them to the Worker, pulls remote changes by server cursor, and applies them locally.
+
+Backup restore is intentionally stronger than a normal incremental edit. After
+restore, Koinly uploads the restored local data as an authoritative cloud
+replacement when the user is signed in. Other devices on the same account
+receive a reset marker, clear their local finance data, and then apply the
+cloud copy so the restored backup fully overwrites local data.
 
 No Turso database token is stored in Flutter. The app talks to:
 
@@ -216,7 +226,7 @@ The older manual snapshot-style sync code and `backend/cloudflare-turso/` refere
 
 ## Backup and restore
 
-Backup files use `.koinlybackup`. Backup includes local app data and preferences. Restore replaces local data with backup contents. Local-only use does not require a sync account.
+Backup files use `.koinlybackup`. Backup includes local app data and preferences. Restore replaces local data with backup contents. Local-only use does not require a sync account. If a sync account is signed in, restore automatically uploads the restored copy to cloud sync; if not signed in, the upload remains pending until sync is configured.
 
 ---
 
