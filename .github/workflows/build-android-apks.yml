@@ -543,8 +543,8 @@ jobs:
           RELEASE_TITLE="Koinly Stable ${VERSION_NAME}"
 
           # Prefer a real version section when it exists. For automatic CI
-          # versions, fall back to the current top Unreleased notes only and
-          # stop before the archived "Previous development history" section.
+          # versions, fall back to only the first/current bullet in each top
+          # Unreleased category and stop before archived development history.
           awk -v version="${VERSION_NAME}" '
             BEGIN { capture=0; found=0 }
             /^##[[:space:]]+\[?v?[0-9]+\.[0-9]+\.[0-9]+\]?/ {
@@ -557,11 +557,24 @@ jobs:
 
           if [ ! -s release-notes-body.md ]; then
             awk '
-              BEGIN { capture=0 }
+              BEGIN { capture=0; in_section=0; emitted_any=0; emitted_in_section=0 }
               /^##[[:space:]]+Unreleased/ { capture=1; next }
               /^##[[:space:]]+/ && capture { exit }
               /^###[[:space:]]+Previous development history/ && capture { exit }
-              capture { print }
+              capture && /^###[[:space:]]+/ {
+                if (emitted_any) print ""
+                print
+                print ""
+                in_section=1
+                emitted_in_section=0
+                next
+              }
+              capture && in_section && /^[[:space:]]*-[[:space:]]+/ && !emitted_in_section {
+                print
+                emitted_in_section=1
+                emitted_any=1
+                next
+              }
             ' CHANGELOG.md > release-notes-body.md
           fi
 

@@ -488,7 +488,7 @@ class UpdateDownloadStore {
 }
 
 class AndroidUpdateInstaller {
-  static const MethodChannel _channel = MethodChannel('com.siamapps.koinly/updater');
+  static const MethodChannel _channel = MethodChannel('com.koinly.siam/updater');
 
   static Future<bool> canInstallPackages() async {
     if (!Platform.isAndroid) return false;

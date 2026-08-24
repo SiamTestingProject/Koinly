@@ -1,4 +1,4 @@
-package com.siamapps.koinly
+package com.koinly.siam
 
 import android.content.Intent
 import android.net.Uri
@@ -11,7 +11,7 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 class MainActivity: FlutterFragmentActivity() {
-    private val updaterChannel = "com.siamapps.koinly/updater"
+    private val updaterChannel = "com.koinly.siam/updater"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)

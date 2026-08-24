@@ -2,26 +2,36 @@
 
 ## Unreleased
 
+### Added
+
+- Loans are enabled again with a full workflow for given/taken loans, repayment history, repayment reminders, overdue alerts, account-balance updates, and cloud sync.
+- Loan records now include Pursenal-style detail fields for institution/provider, loan account number, agreement number, and interest rate.
+
 ### Fixed
 
-- Other signed-in devices now automatically pull cloud changes while the app is open and whenever the app resumes, so new transactions appear across devices without manual restore.
-- Login/cloud restore now removes untouched starter Cash/Card/Bank Account placeholders from the restored local copy, even when real cloud data also exists.
-- Long scrolling lists now avoid duplicate row repaint boundaries, unnecessary keep-alive bookkeeping, and semantic index calculations that made Windows scrolling feel choppier.
-- Android no longer reopens the package installer for a downloaded update after that same version is already installed.
 - Latest release changelog now publishes only the current update notes instead of the full accumulated development history.
-- Made Account & sync uploads more reliable by giving full restore uploads a longer request timeout and replacing raw timeout exceptions with clean user-facing messages.
-- Prevented Upload restored/local changes from appearing to do nothing while a background sync retry is already running.
 
 ### Changed
 
-- Login from setup or Account & sync now always treats cloud data as the source of truth and fully replaces local finance data on the device.
-- Release notes are grouped by current changes, additions, removals, and fixes so the in-app updater shows only the useful “what changed in this update” text.
-- Renamed the Account & sync upload button to “Upload restored data” whenever a restored local backup still needs to become the cloud source of truth.
-- Desktop card surfaces now avoid animated container work, heavy shadows, and per-card gradients during normal rendering for smoother Windows scrolling.
-- Desktop list preloading was reduced so fast scrolling builds fewer off-screen finance cards at once.
+- Added a Pursenal-style Load backup workflow in Settings that opens a file picker, loads a `.koinlybackup` file, replaces local data, and triggers the existing cloud-upload path when signed in.
+- Android package/application ID changed from `com.siamapps.koinly` to `com.koinly.siam`.
+- Transaction amount entry now uses the normal phone/desktop keyboard instead of Koinly's old custom on-screen keypad.
+- Release automation now falls back to only the first/current bullet under each Unreleased heading, so accidental older notes do not flood the newest GitHub Release body.
+- Restore/sync wording now treats loans as an active feature instead of hidden legacy data.
 
 ### Previous development history
 
+- Long scrolling lists now avoid duplicate row repaint boundaries, unnecessary keep-alive bookkeeping, and semantic index calculations that made Windows scrolling feel choppier.
+- Desktop card surfaces now avoid animated container work, heavy shadows, and per-card gradients during normal rendering for smoother Windows scrolling.
+- Desktop list preloading was reduced so fast scrolling builds fewer off-screen finance cards at once.
+- Login/cloud restore now removes untouched starter Cash/Card/Bank Account placeholders from the restored local copy, even when real cloud data also exists.
+- Other signed-in devices now automatically pull cloud changes while the app is open and whenever the app resumes, so new transactions appear across devices without manual restore.
+- Android no longer reopens the package installer for a downloaded update after that same version is already installed.
+- Made Account & sync uploads more reliable by giving full restore uploads a longer request timeout and replacing raw timeout exceptions with clean user-facing messages.
+- Prevented Upload restored/local changes from appearing to do nothing while a background sync retry is already running.
+- Login from setup or Account & sync now always treats cloud data as the source of truth and fully replaces local finance data on the device.
+- Release notes are grouped by current changes, additions, removals, and fixes so the in-app updater shows only the useful “what changed in this update” text.
+- Renamed the Account & sync upload button to “Upload restored data” whenever a restored local backup still needs to become the cloud source of truth.
 - Hid the Account & sync backend-configuration explanation card and the restore/upload help paragraph to keep the sync page cleaner.
 - Reduced Cloudflare Worker subrequests during `/v1/sync/replace` by batching snapshot entity/change writes instead of calling Turso several times per entity.
 - Removed per-operation sequence lookups from authoritative cloud replace uploads; the app only needs accepted entity versions plus the final server cursor for this flow.

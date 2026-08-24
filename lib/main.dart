@@ -182,6 +182,10 @@ class KoinlyDatabase {
         amount REAL NOT NULL,
         loan_date INTEGER NOT NULL,
         due_date INTEGER,
+        institution TEXT NOT NULL DEFAULT '',
+        account_no TEXT NOT NULL DEFAULT '',
+        agreement_no TEXT NOT NULL DEFAULT '',
+        interest_rate REAL,
         notes TEXT NOT NULL,
         repaid_amount REAL NOT NULL DEFAULT 0,
         status TEXT NOT NULL,
@@ -260,6 +264,19 @@ class KoinlyDatabase {
   }
 
   Future<void> _migrateLoanAccountSelection(sql.Database database) async {
+    for (final statement in const [
+      "ALTER TABLE loans ADD COLUMN institution TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE loans ADD COLUMN account_no TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE loans ADD COLUMN agreement_no TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE loans ADD COLUMN interest_rate REAL",
+    ]) {
+      try {
+        await database.execute(statement);
+      } catch (_) {
+        // Column already exists on fresh installs or after a previous migration.
+      }
+    }
+
     try {
       await database.execute("ALTER TABLE loan_repayments ADD COLUMN account_id TEXT NOT NULL DEFAULT ''");
     } catch (_) {
@@ -1199,13 +1216,32 @@ class BackupService {
     await state.reload();
   }
 
+  static Future<File?> pickBackupFile() async {
+    FilePickerResult? picked;
+    try {
+      picked = await FilePicker.platform.pickFiles(
+        dialogTitle: 'Load Koinly backup',
+        type: FileType.custom,
+        allowedExtensions: const ['koinlybackup'],
+      );
+    } catch (_) {
+      picked = await FilePicker.platform.pickFiles(type: FileType.any);
+    }
+    if (picked == null || picked.files.single.path == null) return null;
+    final file = File(picked.files.single.path!);
+    if (!file.path.toLowerCase().endsWith('.koinlybackup')) {
+      throw const FormatException('Please select a Koinly .koinlybackup file.');
+    }
+    return file;
+  }
+
   static Future<bool> restoreBackup(AppController state, {String? safetyReason}) async {
-    final picked = await FilePicker.platform.pickFiles(type: FileType.any);
-    if (picked == null || picked.files.single.path == null) return false;
+    final file = await pickBackupFile();
+    if (file == null) return false;
     if (safetyReason != null) {
       await state.requireSafetyBackup(safetyReason);
     }
-    await restoreBackupFile(state, File(picked.files.single.path!));
+    await restoreBackupFile(state, file);
     return true;
   }
 }
@@ -1263,6 +1299,31 @@ Future<void> runRestoreFlow(BuildContext context, AppController state) async {
   } catch (_) {
     if (context.mounted) {
       showSnack(context, 'Restore failed. Please check the backup file.');
+    }
+  }
+}
+
+Future<void> runLoadBackupFlow(BuildContext context, AppController state) async {
+  try {
+    final restored = await BackupService.restoreBackup(state, safetyReason: 'Before loading backup file');
+    if (!restored) {
+      if (context.mounted) showSnack(context, 'Load cancelled.');
+      return;
+    }
+    await state.markRestoredDataForCloudUpload();
+    if (context.mounted) {
+      showSnack(
+        context,
+        state.cloudSyncEnabled ? 'Backup loaded. Local data was replaced and is uploading to cloud sync.' : 'Backup loaded. Local data was replaced.',
+      );
+    }
+  } on FormatException catch (e) {
+    if (context.mounted) {
+      showSnack(context, e.message);
+    }
+  } catch (_) {
+    if (context.mounted) {
+      showSnack(context, 'Could not load backup. Please choose a valid Koinly backup file.');
     }
   }
 }
@@ -8299,7 +8360,21 @@ class _TransactionEditorState extends State<TransactionEditor> {
               }),
             ),
             const SizedBox(height: 12),
-            AmountPadField(controller: amount),
+            TextField(
+              controller: amount,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              textInputAction: TextInputAction.next,
+              textAlign: TextAlign.end,
+              inputFormatters: [
+                TextInputFormatter.withFunction((oldValue, newValue) {
+                  final text = newValue.text;
+                  if (text.isEmpty || RegExp(r'^\d*\.?\d*$').hasMatch(text)) return newValue;
+                  return oldValue;
+                }),
+              ],
+              style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900),
+              decoration: const InputDecoration(prefixIcon: Icon(Icons.calculate_rounded), labelText: 'Amount'),
+            ),
             const SizedBox(height: 12),
             if (type != MoneyTransactionType.transfer && widget.lockedCategory == null)
               AppleSelectionField(
@@ -8400,112 +8475,6 @@ class _TransactionEditorState extends State<TransactionEditor> {
               }, child: const Text('Save'))),
             ]),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class AmountPadField extends StatefulWidget {
-  const AmountPadField({super.key, required this.controller});
-  final TextEditingController controller;
-
-  @override
-  State<AmountPadField> createState() => _AmountPadFieldState();
-}
-
-class _AmountPadFieldState extends State<AmountPadField> {
-  void input(String v) {
-    var text = widget.controller.text;
-    if (v == '⌫') {
-      text = text.length <= 1 ? '0' : text.substring(0, text.length - 1);
-    } else if (v == 'C') {
-      text = '0';
-    } else if (v == '.') {
-      if (!text.contains('.')) text += '.';
-    } else {
-      text = text == '0' ? v : text + v;
-    }
-    setState(() => widget.controller.text = text);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '.', '⌫'];
-    return ExpressiveCard(
-      padding: const EdgeInsets.all(10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          TextField(
-            controller: widget.controller,
-            readOnly: true,
-            showCursor: false,
-            enableInteractiveSelection: false,
-            keyboardType: TextInputType.none,
-            textAlign: TextAlign.end,
-            style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900),
-            decoration: const InputDecoration(prefixIcon: Icon(Icons.calculate_rounded), labelText: 'Amount'),
-          ),
-          const SizedBox(height: 8),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              const spacing = 8.0;
-              final buttonWidth = (constraints.maxWidth - spacing * 2) / 3;
-              final buttonHeight = (buttonWidth * 0.36).clamp(46.0, 58.0).toDouble();
-              return Wrap(
-                spacing: spacing,
-                runSpacing: spacing,
-                children: keys
-                    .map((k) => SizedBox(
-                          width: buttonWidth,
-                          height: buttonHeight,
-                          child: _AmountPadButton(
-                            label: k,
-                            onPressed: () => input(k),
-                          ),
-                        ))
-                    .toList(),
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _AmountPadButton extends StatelessWidget {
-  const _AmountPadButton({required this.label, required this.onPressed});
-
-  final String label;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final isAction = label == 'C' || label == '⌫';
-    return Material(
-      color: isAction ? scheme.secondaryContainer : scheme.primaryContainer,
-      borderRadius: BorderRadius.circular(20),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onPressed,
-        child: Center(
-          child: FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Text(
-              label,
-              textScaler: TextScaler.noScaling,
-              textHeightBehavior: const TextHeightBehavior(applyHeightToFirstAscent: false, applyHeightToLastDescent: false),
-              style: TextStyle(
-                color: isAction ? scheme.onSecondaryContainer : scheme.onPrimaryContainer,
-                fontSize: 23,
-                height: 1,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ),
         ),
       ),
     );
@@ -11453,8 +11422,12 @@ class LoanDetailScreen extends StatelessWidget {
                 const SectionHeader('Details'),
                 ExpressiveCard(child: Column(children: [
                   _detailRow(loan.type == LoanType.given ? 'Paid from' : 'Received into', state.accountOf(loan.accountId)?.name ?? 'Unknown'),
-                  _detailRow('Loan date', DateFormat('MMM d, yyyy').format(loan.loanDate)),
-                  _detailRow('Due date', loan.dueDate == null ? 'Not set' : DateFormat('MMM d, yyyy').format(loan.dueDate!)),
+                  _detailRow('Start date', DateFormat('MMM d, yyyy').format(loan.loanDate)),
+                  _detailRow('End / due', loan.dueDate == null ? 'Not set' : DateFormat('MMM d, yyyy').format(loan.dueDate!)),
+                  if (loan.institution.isNotEmpty) _detailRow('Institution', loan.institution),
+                  if (loan.accountNo.isNotEmpty) _detailRow('Account no.', loan.accountNo),
+                  if (loan.agreementNo.isNotEmpty) _detailRow('Agreement', loan.agreementNo),
+                  if (loan.interestRate != null) _detailRow('Interest', '${loan.interestRate!.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '')}%'),
                   _detailRow('Notes', loan.notes.isEmpty ? 'No notes' : loan.notes),
                 ])),
                 const SectionHeader('Repayment reminders'),
@@ -11507,6 +11480,10 @@ class LoanEditor extends StatefulWidget {
 class _LoanEditorState extends State<LoanEditor> {
   final person = TextEditingController();
   final amount = TextEditingController();
+  final institution = TextEditingController();
+  final accountNo = TextEditingController();
+  final agreementNo = TextEditingController();
+  final interestRate = TextEditingController();
   final notes = TextEditingController();
   LoanType type = LoanType.given;
   String? accountId;
@@ -11522,6 +11499,10 @@ class _LoanEditorState extends State<LoanEditor> {
     if (loan != null) {
       person.text = loan.personName;
       amount.text = loan.amount.toStringAsFixed(2);
+      institution.text = loan.institution;
+      accountNo.text = loan.accountNo;
+      agreementNo.text = loan.agreementNo;
+      interestRate.text = loan.interestRate == null ? '' : loan.interestRate!.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
       notes.text = loan.notes;
       type = loan.type;
       accountId = loan.accountId;
@@ -11541,6 +11522,10 @@ class _LoanEditorState extends State<LoanEditor> {
   void dispose() {
     person.dispose();
     amount.dispose();
+    institution.dispose();
+    accountNo.dispose();
+    agreementNo.dispose();
+    interestRate.dispose();
     notes.dispose();
     for (final draft in reminderDrafts) {
       draft.dispose();
@@ -11597,10 +11582,36 @@ class _LoanEditorState extends State<LoanEditor> {
             ),
             const SizedBox(height: 12),
             Row(children: [
-              Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await pickDate(context, loanDate); if (d != null) setState(() => loanDate = d); }, icon: const Icon(Icons.date_range_rounded), label: Text(DateFormat('MMM d, yyyy').format(loanDate)))),
+              Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await pickDate(context, loanDate); if (d != null) setState(() => loanDate = d); }, icon: const Icon(Icons.date_range_rounded), label: Text('Start ${DateFormat('MMM d, yyyy').format(loanDate)}'))),
               const SizedBox(width: 8),
-              Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await pickDate(context, dueDate ?? loanDate); if (d != null) setState(() => dueDate = d); }, icon: const Icon(Icons.event_available_rounded), label: Text(dueDate == null ? 'Due date' : DateFormat('MMM d').format(dueDate!)))),
+              Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await pickDate(context, dueDate ?? loanDate); if (d != null) setState(() => dueDate = d); }, icon: const Icon(Icons.event_available_rounded), label: Text(dueDate == null ? 'End / due date' : 'End ${DateFormat('MMM d').format(dueDate!)}'))),
             ]),
+            const SizedBox(height: 12),
+            ExpressiveCard(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text('Loan details', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 10),
+                  TextField(controller: institution, textCapitalization: TextCapitalization.words, decoration: const InputDecoration(labelText: 'Institution / provider')),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(child: TextField(controller: accountNo, decoration: const InputDecoration(labelText: 'Loan account no.'))),
+                      const SizedBox(width: 10),
+                      Expanded(child: TextField(controller: agreementNo, decoration: const InputDecoration(labelText: 'Agreement no.'))),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: interestRate,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'Interest rate', suffixText: '%'),
+                  ),
+                ],
+              ),
+            ),
             const SizedBox(height: 12),
             TextField(controller: notes, minLines: 1, maxLines: 3, decoration: const InputDecoration(labelText: 'Notes')),
             const SizedBox(height: 14),
@@ -11650,7 +11661,24 @@ class _LoanEditorState extends State<LoanEditor> {
                 if (value <= 0 || person.text.trim().isEmpty || accountId == null) return;
                 final now = DateTime.now();
                 final loanId = widget.loan?.id ?? _uuid.v4();
-                final loan = Loan(id: loanId, type: type, accountId: accountId!, personName: person.text.trim(), amount: value, loanDate: loanDate, dueDate: dueDate, notes: notes.text.trim(), repaidAmount: widget.loan?.repaidAmount ?? 0, status: widget.loan?.status ?? LoanStatus.open, createdOn: widget.loan?.createdOn ?? now, updatedOn: now);
+                final loan = Loan(
+                  id: loanId,
+                  type: type,
+                  accountId: accountId!,
+                  personName: person.text.trim(),
+                  amount: value,
+                  loanDate: loanDate,
+                  dueDate: dueDate,
+                  institution: institution.text.trim(),
+                  accountNo: accountNo.text.trim(),
+                  agreementNo: agreementNo.text.trim(),
+                  interestRate: double.tryParse(interestRate.text),
+                  notes: notes.text.trim(),
+                  repaidAmount: widget.loan?.repaidAmount ?? 0,
+                  status: widget.loan?.status ?? LoanStatus.open,
+                  createdOn: widget.loan?.createdOn ?? now,
+                  updatedOn: now,
+                );
                 if (widget.loan == null) { await state.addLoan(loan); } else { await state.updateLoan(loan); }
                 final reminders = reminderDrafts
                     .where((draft) => (double.tryParse(draft.amount.text) ?? 0) > 0)
@@ -11906,6 +11934,7 @@ class SettingsScreen extends StatelessWidget {
             SettingsTile(icon: Icons.system_update_alt_rounded, title: 'Updates', subtitle: state.updateStatusMessage, color: '#00D7E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const UpdatesScreen()))),
             SettingsTile(icon: Icons.filter_alt_rounded, title: 'Default date filter', subtitle: _dateRangeLabel(state.dateRangeType), color: '#B4A5FF', onTap: () => showDateRangeSheet(context)),
             SettingsTile(icon: Icons.ios_share_rounded, title: 'Export', subtitle: 'CSV / PDF reports with current filters', color: '#FFB5D0', onTap: () => showExportSheet(context)),
+            SettingsTile(icon: Icons.file_open_rounded, title: 'Load backup', subtitle: 'Pick a .koinlybackup file and replace local data', color: '#86E3CE', onTap: () => runLoadBackupFlow(context, state)),
             SettingsTile(icon: Icons.tune_rounded, title: 'Advanced settings', subtitle: 'Defaults, performance, app lock, backup', color: '#9AD0F5', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdvancedSettingsScreen()))),
             SettingsTile(icon: Icons.info_rounded, title: 'About app', subtitle: 'Version, credits, licenses, and links', color: '#86E3CE', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AboutScreen()))),
           ],
@@ -12533,7 +12562,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Restore cloud copy?'),
-        content: const Text('This downloads the cloud data for this account and completely overwrites local accounts, categories, transactions, budgets, and hidden legacy loan data on this device.'),
+        content: const Text('This downloads the cloud data for this account and completely overwrites local accounts, categories, transactions, budgets, loans, and repayment reminders on this device.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Restore cloud')),
@@ -14469,7 +14498,7 @@ class AdvancedSettingsScreen extends StatelessWidget {
             ),
           ),
           SettingsTile(icon: Icons.backup_rounded, title: 'Backup', color: '#86E3CE', onTap: () => runBackupFlow(context, state)),
-          SettingsTile(icon: Icons.restore_rounded, title: 'Restore', color: '#B4A5FF', onTap: () => runRestoreFlow(context, state)),
+          SettingsTile(icon: Icons.file_open_rounded, title: 'Load backup', subtitle: 'Pick a backup file and overwrite this device', color: '#B4A5FF', onTap: () => runLoadBackupFlow(context, state)),
           SettingsTile(
             icon: Icons.fact_check_rounded,
             title: 'Data health',

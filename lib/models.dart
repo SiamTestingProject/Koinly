@@ -499,6 +499,10 @@ class Loan {
     required this.amount,
     required this.loanDate,
     this.dueDate,
+    this.institution = '',
+    this.accountNo = '',
+    this.agreementNo = '',
+    this.interestRate,
     required this.notes,
     required this.repaidAmount,
     required this.status,
@@ -513,6 +517,10 @@ class Loan {
   final double amount;
   final DateTime loanDate;
   final DateTime? dueDate;
+  final String institution;
+  final String accountNo;
+  final String agreementNo;
+  final double? interestRate;
   final String notes;
   final double repaidAmount;
   final LoanStatus status;
@@ -530,6 +538,10 @@ class Loan {
         'amount': amount,
         'loan_date': dateToDb(loanDate),
         'due_date': dueDate == null ? null : dateToDb(dueDate!),
+        'institution': institution,
+        'account_no': accountNo,
+        'agreement_no': agreementNo,
+        'interest_rate': interestRate,
         'notes': notes,
         'repaid_amount': repaidAmount,
         'status': enumName(status),
@@ -545,6 +557,10 @@ class Loan {
         amount: (map['amount'] as num? ?? 0).toDouble(),
         loanDate: dateFromDb(map['loan_date']),
         dueDate: map['due_date'] == null ? null : dateFromDb(map['due_date']),
+        institution: map['institution'] as String? ?? '',
+        accountNo: map['account_no'] as String? ?? '',
+        agreementNo: map['agreement_no'] as String? ?? '',
+        interestRate: (map['interest_rate'] as num?)?.toDouble(),
         notes: map['notes'] as String? ?? '',
         repaidAmount: (map['repaid_amount'] as num? ?? 0).toDouble(),
         status: enumByName(LoanStatus.values, map['status'] as String?, LoanStatus.open),
@@ -560,6 +576,10 @@ class Loan {
     double? amount,
     DateTime? loanDate,
     DateTime? dueDate,
+    String? institution,
+    String? accountNo,
+    String? agreementNo,
+    double? interestRate,
     String? notes,
     double? repaidAmount,
     LoanStatus? status,
@@ -573,6 +593,10 @@ class Loan {
         amount: amount ?? this.amount,
         loanDate: loanDate ?? this.loanDate,
         dueDate: dueDate ?? this.dueDate,
+        institution: institution ?? this.institution,
+        accountNo: accountNo ?? this.accountNo,
+        agreementNo: agreementNo ?? this.agreementNo,
+        interestRate: interestRate ?? this.interestRate,
         notes: notes ?? this.notes,
         repaidAmount: repaidAmount ?? this.repaidAmount,
         status: status ?? this.status,
@@ -862,4 +886,3 @@ class BudgetProgress {
   final List<MoneyTransaction> transactions;
   double get ratio => budget.amount <= 0 ? 0 : spent / budget.amount;
 }
-

@@ -7,12 +7,12 @@ plugins {
 }
 
 android {
-    namespace = "com.siamapps.koinly"
+    namespace = "com.koinly.siam"
     compileSdk = 36
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
-        applicationId = "com.siamapps.koinly"
+        applicationId = "com.koinly.siam"
         minSdk = 23
         targetSdk = 36
         versionCode = 71

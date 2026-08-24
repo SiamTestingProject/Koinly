@@ -25,6 +25,7 @@ A local-first personal finance tracker built in Flutter with a polished Material
 | --- | --- |
 | App framework | Flutter / Dart |
 | Platforms | Android and Windows |
+| Android package ID | `com.koinly.siam` |
 | UI system | Dark glass finance dashboard inspired by the latest Koinly mockup, with cyan accents, compact cards, centered popups, and adaptive spacing |
 | Local database | SQLite via `sqflite` and desktop SQLite FFI |
 | State management | `provider` + `ChangeNotifier` |
@@ -52,7 +53,7 @@ The project is being gradually split out of the original large single-file Flutt
 - `lib/icon_helpers.dart` contains shared icon lookup, custom-image icon handling, and reusable icon bubble rendering.
 - `lib/models.dart` contains finance enums, SQLite mapping models, date/color helpers, and data-health model types.
 - `lib/persistence_stores.dart` contains SharedPreferences and secure credential storage wrappers.
-- `lib/reminder_service.dart` contains local notification setup plus daily and hidden loan reminder scheduling.
+- `lib/reminder_service.dart` contains local notification setup plus daily and loan repayment reminder scheduling.
 - `lib/sync_models.dart` contains shared sync exception/session data types.
 - `lib/sync_services.dart` contains legacy Cloudflare sync, account sync API client, and MongoDB snapshot sync helpers.
 - `lib/ui_foundation.dart` contains responsive breakpoints, shared motion/shape helpers, page transitions, pressable behavior, and scroll physics.
@@ -87,7 +88,7 @@ Expected release assets:
 - `Koinly-v<version>.aab`
 - `Koinly-v<version>-Setup.exe`
 
-Release notes come from `CHANGELOG.md`. The workflow first looks for the current version section, then falls back to only the top current-update notes in `## Unreleased` and stops before `### Previous development history`. This keeps the in-app Latest release changelog focused on what was changed, added, removed, or fixed in that release only.
+Release notes come from `CHANGELOG.md`. The workflow first looks for the current version section, then falls back to only the first/current bullet under each heading in `## Unreleased` and stops before `### Previous development history`. This keeps the in-app Latest release changelog focused on what was changed, added, removed, or fixed in that exact release only.
 
 ---
 
@@ -121,13 +122,13 @@ Release notes come from `CHANGELOG.md`. The workflow first looks for the current
 
 ## Data safety
 
-- Manual backup restore creates a local safety backup before importing the selected `.koinlybackup`.
+- Manual backup restore and the Settings Load backup workflow create a local safety backup before importing the selected `.koinlybackup`.
 - Restore cloud copy and setup-login cloud overwrite download the cloud copy first, then create a safety backup, then replace local finance data.
 - Server reset sync operations also create a safety backup before clearing local finance data.
 - Legacy online cloud restore also creates a safety backup before replacing local data.
 - The app keeps the newest 3 safety backups in local app storage.
 - **Advanced settings → Restore last safety backup** reopens the latest safety backup if a restore/cloud-overwrite needs to be undone.
-- Restored data is automatically marked as the local source of truth and uploads to cloud sync when the user is signed in.
+- Loaded/restored backup data is automatically marked as the local source of truth and uploads to cloud sync when the user is signed in.
 
 ---
 
@@ -243,7 +244,7 @@ Koinly supports regular accounts, credit accounts, and Savings accounts. Users c
 
 ### Transactions
 
-Koinly supports income, expense, and transfer transactions with date/time, amount, account, category, and notes. Filters support date range, account, category, and transaction type. Transfer records avoid category double counting. Savings movements stay out of income/expense totals.
+Koinly supports income, expense, and transfer transactions with date/time, amount, account, category, and notes. Amount entry uses the normal Android soft keyboard or desktop keyboard instead of a custom in-app keypad. Filters support date range, account, category, and transaction type. Transfer records avoid category double counting. Savings movements stay out of income/expense totals.
 
 ### Categories
 
@@ -281,7 +282,7 @@ Koinly supports CSV export, PDF export, filter-aware export data, shared export 
 
 ### Settings
 
-Settings includes theme, currency, currency symbol/code, prefix/suffix placement, number separators, daily reminder time, default account, default expense category, default income category, default date filter, Savings suggestion profile, backup/restore, app lock/security, Account & sync, Updates, About, privacy policy, terms, and licenses.
+Settings includes theme, currency, currency symbol/code, prefix/suffix placement, number separators, daily reminder time, default account, default expense category, default income category, default date filter, Savings suggestion profile, export, Load backup, app lock/security, Account & sync, Updates, About, privacy policy, terms, and licenses.
 
 ### Hidden Settings
 
@@ -428,7 +429,7 @@ The app is currently implemented mainly in `lib/main.dart`. GitHub Actions can r
 
 ## Data model overview
 
-The app stores local data for accounts, categories, transactions, budgets, savings suggestion profile, daily savings suggestion seen status, settings/preferences, backup metadata, and sync metadata. Legacy loan tables are preserved internally for backup/sync compatibility while the user-facing loan feature is hidden for now.
+The app stores local data for accounts, categories, transactions, budgets, loans, loan repayments, loan repayment reminders, savings suggestion profile, daily savings suggestion seen status, settings/preferences, backup metadata, and sync metadata.
 
 Important classification fields include transaction type, account IDs, category ID, transfer target, created date/time, reminder status, and budget scope.
 

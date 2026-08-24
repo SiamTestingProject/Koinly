@@ -17,7 +17,7 @@ const appTitle = 'Koinly';
 const appVersion = String.fromEnvironment('KOINLY_APP_VERSION', defaultValue: '1.0.70');
 const backupPassword = 'YOUR_SECRET_PASSWORD';
 const kSyncAdminTelegramUrl = 'https://t.me/Ch0wdhury_Siam';
-final bool kLoansFeatureEnabled = bool.fromEnvironment('KOINLY_ENABLE_LOANS', defaultValue: false);
+final bool kLoansFeatureEnabled = bool.fromEnvironment('KOINLY_ENABLE_LOANS', defaultValue: true);
 
 const int kHomeTabIndex = 0;
 const int kAnalysisTabIndex = 1;
