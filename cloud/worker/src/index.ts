@@ -1,12 +1,16 @@
-import { createClient, type Client } from '@libsql/client/web';
+import { createClient, type Client, type Transaction } from '@libsql/client/web';
 
 type Env = {
   TURSO_DATABASE_URL: string;
   TURSO_AUTH_TOKEN: string;
   JWT_SECRET: string;
+  TELEGRAM_BOT_TOKEN: string;
+  REGISTRATION_KEY_CHAT_ID: string;
+  REGISTRATION_ADMIN_SECRET: string;
   ACCESS_TOKEN_TTL_SECONDS?: string;
   REFRESH_TOKEN_TTL_SECONDS?: string;
   MAX_SYNC_BATCH_SIZE?: string;
+  REGISTRATION_KEY_TTL_SECONDS?: string;
 };
 
 type AuthContext = {
@@ -34,6 +38,7 @@ const requiredTables = [
   'sync_changes',
   'processed_operations',
   'rate_limits',
+  'registration_keys',
 ];
 
 const schemaStatements = [
@@ -104,14 +109,35 @@ const schemaStatements = [
     window_start INTEGER NOT NULL,
     count INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS registration_keys (
+    id TEXT PRIMARY KEY,
+    key_hash TEXT NOT NULL UNIQUE,
+    encrypted_key TEXT NOT NULL,
+    encryption_iv TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    used_at INTEGER,
+    used_by_user_id TEXT,
+    status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'USED', 'REVOKED', 'EXPIRED')),
+    revoked_at INTEGER,
+    created_by TEXT NOT NULL,
+    delivery_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(delivery_status IN ('PENDING', 'DELIVERED', 'FAILED')),
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+    last_delivery_attempt_at INTEGER,
+    delivered_at INTEGER,
+    delivery_error TEXT,
+    FOREIGN KEY(used_by_user_id) REFERENCES users(id)
+  )`,
   'CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id, device_id)',
   'CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id, last_seen_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_sync_changes_user_sequence ON sync_changes(user_id, sequence)',
   'CREATE INDEX IF NOT EXISTS idx_sync_entities_user_updated ON sync_entities(user_id, updated_at DESC)',
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_keys_one_active ON registration_keys(status) WHERE status = 'ACTIVE'",
+  'CREATE INDEX IF NOT EXISTS idx_registration_keys_created ON registration_keys(created_at DESC)',
 ];
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, context: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     let db: Client | undefined;
 
@@ -124,9 +150,15 @@ export default {
       db = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
       await ensureSchema(db);
 
-      if (request.method === 'POST' && url.pathname === '/v1/auth/register') return await register(request, env, db);
+      if (request.method === 'POST' && url.pathname === '/v1/auth/register') {
+        await ensureActiveRegistrationKey(env, db, context);
+        return await register(request, env, db, context);
+      }
       if (request.method === 'POST' && url.pathname === '/v1/auth/login') return await login(request, env, db);
       if (request.method === 'POST' && url.pathname === '/v1/auth/refresh') return await refresh(request, env, db);
+      if (url.pathname.startsWith('/v1/admin/registration-key/')) {
+        return await registrationKeyAdmin(request, url, env, db, context);
+      }
 
       const auth = await requireAuth(request, env);
       if (request.method === 'POST' && url.pathname === '/v1/auth/logout') return await logout(request, db, auth);
@@ -170,6 +202,7 @@ function rootResponse(env: Env): Response {
       replace: 'POST /v1/sync/replace',
       pull: 'GET /v1/sync/pull?cursor=0&limit=100',
       status: 'GET /v1/sync/status',
+      registrationKeyAdmin: 'Protected /v1/admin/registration-key/* endpoints',
     },
   });
 }
@@ -217,7 +250,14 @@ async function healthResponse(env: Env): Promise<Response> {
 }
 
 function isWorkerConfigured(env: Env): boolean {
-  return Boolean(env.TURSO_DATABASE_URL && env.TURSO_AUTH_TOKEN && env.JWT_SECRET);
+  return Boolean(
+    env.TURSO_DATABASE_URL &&
+    env.TURSO_AUTH_TOKEN &&
+    env.JWT_SECRET &&
+    env.TELEGRAM_BOT_TOKEN &&
+    env.REGISTRATION_KEY_CHAT_ID &&
+    env.REGISTRATION_ADMIN_SECRET?.length >= 32,
+  );
 }
 
 function validateWorkerConfig(env: Env): void {
@@ -225,10 +265,16 @@ function validateWorkerConfig(env: Env): void {
     ['TURSO_DATABASE_URL', env.TURSO_DATABASE_URL],
     ['TURSO_AUTH_TOKEN', env.TURSO_AUTH_TOKEN],
     ['JWT_SECRET', env.JWT_SECRET],
+    ['TELEGRAM_BOT_TOKEN', env.TELEGRAM_BOT_TOKEN],
+    ['REGISTRATION_KEY_CHAT_ID', env.REGISTRATION_KEY_CHAT_ID],
+    ['REGISTRATION_ADMIN_SECRET', env.REGISTRATION_ADMIN_SECRET],
   ].filter(([, value]) => !value).map(([name]) => name);
 
   if (missing.length > 0) {
     throw new HttpError(503, `Worker is missing required secret(s): ${missing.join(', ')}.`);
+  }
+  if (env.REGISTRATION_ADMIN_SECRET.length < 32) {
+    throw new HttpError(503, 'REGISTRATION_ADMIN_SECRET must contain at least 32 characters.');
   }
 }
 
@@ -257,10 +303,11 @@ function databaseErrorMessage(error: unknown): string {
   return message.replace(/\s+/g, ' ').slice(0, 240);
 }
 
-async function register(request: Request, env: Env, db: Client): Promise<Response> {
+async function register(request: Request, env: Env, db: Client, context: ExecutionContext): Promise<Response> {
   const body = await readJson(request);
   const email = normalizeEmail(body.email);
   const password = String(body.password ?? '');
+  const registrationKey = normalizeRegistrationKey(body.registrationKey);
   const deviceId = normalizeId(body.deviceId, 'deviceId');
   const deviceName = cleanText(body.deviceName, 80) || 'Koinly device';
   const platform = cleanText(body.platform, 40) || 'unknown';
@@ -269,25 +316,373 @@ async function register(request: Request, env: Env, db: Client): Promise<Respons
   const now = Date.now();
   const userId = crypto.randomUUID();
   const passwordHash = await hashPassword(password, env.JWT_SECRET);
+  const registrationKeyHash = await sha256(registrationKey);
+  const nextKey = await createRegistrationKeyRecord(env, 'SYSTEM_ROTATION', now, 'Used');
+  const transaction = await db.transaction('write');
   try {
-    await db.batch([
-      {
-        sql: 'INSERT INTO users(id, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-        args: [userId, email, passwordHash, now, now],
-      },
-      {
-        sql: 'INSERT INTO devices(id, user_id, name, platform, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)',
-        args: [deviceId, userId, deviceName, platform, now, now],
-      },
-    ], 'write');
+    const keyRow = (await transaction.execute({
+      sql: `SELECT id, status, expires_at FROM registration_keys WHERE key_hash = ? LIMIT 1`,
+      args: [registrationKeyHash],
+    })).rows[0];
+    validateRegistrationKeyRow(keyRow, now);
+
+    await transaction.execute({
+      sql: 'INSERT INTO users(id, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      args: [userId, email, passwordHash, now, now],
+    });
+    const consumed = await transaction.execute({
+      sql: `UPDATE registration_keys
+            SET status = 'USED', used_at = ?, used_by_user_id = ?
+            WHERE id = ? AND status = 'ACTIVE' AND used_at IS NULL AND revoked_at IS NULL
+              AND (expires_at IS NULL OR expires_at > ?)`,
+      args: [now, userId, String(keyRow!.id), now],
+    });
+    if (consumed.rowsAffected !== 1) {
+      throw new HttpError(409, 'Registration key has already been used.');
+    }
+    await transaction.execute({
+      sql: 'INSERT INTO devices(id, user_id, name, platform, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)',
+      args: [deviceId, userId, deviceName, platform, now, now],
+    });
+    await insertRegistrationKey(transaction, nextKey);
+    await transaction.commit();
   } catch (error) {
+    if (error instanceof HttpError) throw error;
     const message = databaseErrorMessage(error);
     if (message.toLowerCase().includes('unique') || message.toLowerCase().includes('constraint')) {
       throw new HttpError(409, 'An account already exists for this email.');
     }
     throw new HttpError(503, `Could not create sync account: ${message}`);
+  } finally {
+    transaction.close();
   }
+  scheduleRegistrationKeyDelivery(env, context, nextKey);
   return issueTokens(env, db, { userId, email, deviceId });
+}
+
+type RegistrationKeyRecord = {
+  id: string;
+  plaintext: string;
+  keyHash: string;
+  encryptedKey: string;
+  encryptionIv: string;
+  createdAt: number;
+  expiresAt: number;
+  createdBy: string;
+  previousStatus: string;
+};
+
+async function ensureActiveRegistrationKey(env: Env, db: Client, context: ExecutionContext): Promise<void> {
+  const now = Date.now();
+  const pending = await createRegistrationKeyRecord(env, 'SYSTEM_BOOTSTRAP', now, 'None');
+  const transaction = await db.transaction('write');
+  let created = false;
+  try {
+    await transaction.execute({
+      sql: `UPDATE registration_keys SET status = 'EXPIRED'
+            WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at <= ?`,
+      args: [now],
+    });
+    const active = (await transaction.execute({
+      sql: `SELECT id FROM registration_keys WHERE status = 'ACTIVE' LIMIT 1`,
+      args: [],
+    })).rows[0];
+    if (!active) {
+      await insertRegistrationKey(transaction, pending);
+      created = true;
+    }
+    await transaction.commit();
+  } catch (error) {
+    const message = databaseErrorMessage(error).toLowerCase();
+    if (!message.includes('unique') && !message.includes('constraint')) throw error;
+  } finally {
+    transaction.close();
+  }
+  if (created) scheduleRegistrationKeyDelivery(env, context, pending);
+}
+
+async function registrationKeyAdmin(request: Request, url: URL, env: Env, db: Client, context: ExecutionContext): Promise<Response> {
+  await requireRegistrationAdmin(request, env);
+  await expireRegistrationKeys(db);
+
+  if (request.method === 'POST' && url.pathname === '/v1/admin/registration-key/bootstrap') {
+    await ensureActiveRegistrationKey(env, db, context);
+    const row = await currentRegistrationKey(db);
+    return privateJson({ ok: true, key: row ? registrationKeyMetadata(row) : null });
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/admin/registration-key/status') {
+    const row = await currentRegistrationKey(db);
+    return privateJson({ ok: true, key: row ? registrationKeyMetadata(row) : null });
+  }
+  if (request.method === 'GET' && url.pathname === '/v1/admin/registration-key/reveal') {
+    const row = await currentRegistrationKey(db);
+    if (!row) throw new HttpError(404, 'No active registration key exists.');
+    const key = await decryptRegistrationKey(env.JWT_SECRET, String(row.encrypted_key), String(row.encryption_iv));
+    return privateJson({ ok: true, key, metadata: registrationKeyMetadata(row) });
+  }
+  if (request.method === 'POST' && url.pathname === '/v1/admin/registration-key/rotate') {
+    const nextKey = await rotateRegistrationKey(env, db, 'ADMIN_ROTATION', 'Revoked');
+    scheduleRegistrationKeyDelivery(env, context, nextKey);
+    return privateJson({ ok: true, key: registrationKeyPublicMetadata(nextKey), delivery: 'PENDING' });
+  }
+  if (request.method === 'POST' && url.pathname === '/v1/admin/registration-key/revoke') {
+    const now = Date.now();
+    const result = await db.execute({
+      sql: `UPDATE registration_keys SET status = 'REVOKED', revoked_at = ? WHERE status = 'ACTIVE'`,
+      args: [now],
+    });
+    return privateJson({ ok: true, revoked: result.rowsAffected });
+  }
+  if (request.method === 'POST' && url.pathname === '/v1/admin/registration-key/retry-delivery') {
+    const row = await currentRegistrationKey(db);
+    if (!row) throw new HttpError(404, 'No active registration key exists.');
+    const record = await registrationKeyRecordFromRow(env, row, 'Rotated');
+    scheduleRegistrationKeyDelivery(env, context, record);
+    return privateJson({ ok: true, delivery: 'PENDING', key: registrationKeyMetadata(row) });
+  }
+  return json({ error: 'Admin registration-key endpoint not found.' }, 404);
+}
+
+async function rotateRegistrationKey(env: Env, db: Client, createdBy: string, previousStatus: string): Promise<RegistrationKeyRecord> {
+  const now = Date.now();
+  const nextKey = await createRegistrationKeyRecord(env, createdBy, now, previousStatus);
+  const transaction = await db.transaction('write');
+  try {
+    await transaction.execute({
+      sql: `UPDATE registration_keys SET status = 'REVOKED', revoked_at = ? WHERE status = 'ACTIVE'`,
+      args: [now],
+    });
+    await insertRegistrationKey(transaction, nextKey);
+    await transaction.commit();
+    return nextKey;
+  } finally {
+    transaction.close();
+  }
+}
+
+async function expireRegistrationKeys(db: Client): Promise<void> {
+  const now = Date.now();
+  await db.execute({
+    sql: `UPDATE registration_keys SET status = 'EXPIRED'
+          WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at <= ?`,
+    args: [now],
+  });
+}
+
+async function currentRegistrationKey(db: Client): Promise<Record<string, unknown> | undefined> {
+  const row = (await db.execute({
+    sql: `SELECT id, encrypted_key, encryption_iv, created_at, expires_at, status, created_by,
+                 delivery_status, delivery_attempts, last_delivery_attempt_at, delivered_at, delivery_error
+          FROM registration_keys WHERE status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1`,
+    args: [],
+  })).rows[0];
+  return row as Record<string, unknown> | undefined;
+}
+
+async function createRegistrationKeyRecord(
+  env: Env,
+  createdBy: string,
+  createdAt: number,
+  previousStatus: string,
+): Promise<RegistrationKeyRecord> {
+  const plaintext = generateRegistrationKey();
+  const normalized = normalizeRegistrationKey(plaintext);
+  const encrypted = await encryptRegistrationKey(env.JWT_SECRET, plaintext);
+  return {
+    id: crypto.randomUUID(),
+    plaintext,
+    keyHash: await sha256(normalized),
+    encryptedKey: encrypted.ciphertext,
+    encryptionIv: encrypted.iv,
+    createdAt,
+    expiresAt: createdAt + numberEnv(env.REGISTRATION_KEY_TTL_SECONDS, 2592000) * 1000,
+    createdBy,
+    previousStatus,
+  };
+}
+
+async function insertRegistrationKey(transaction: Transaction, key: RegistrationKeyRecord): Promise<void> {
+  await transaction.execute({
+    sql: `INSERT INTO registration_keys(
+            id, key_hash, encrypted_key, encryption_iv, created_at, expires_at, status, created_by,
+            delivery_status, delivery_attempts
+          ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, 'PENDING', 0)`,
+    args: [key.id, key.keyHash, key.encryptedKey, key.encryptionIv, key.createdAt, key.expiresAt, key.createdBy],
+  });
+}
+
+function validateRegistrationKeyRow(row: Record<string, unknown> | undefined, now: number): void {
+  if (!row) throw new HttpError(403, 'Registration key is invalid.');
+  const status = String(row.status ?? '');
+  if (status === 'USED') throw new HttpError(409, 'Registration key has already been used.');
+  if (status === 'REVOKED') throw new HttpError(403, 'Registration key has been revoked.');
+  if (status === 'EXPIRED' || (row.expires_at != null && Number(row.expires_at) <= now)) {
+    throw new HttpError(403, 'Registration key has expired.');
+  }
+  if (status !== 'ACTIVE') throw new HttpError(403, 'Registration key is not active.');
+}
+
+function generateRegistrationKey(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const payload = Array.from(bytes, byte => alphabet[byte & 31]).join('');
+  return `KLY1-${payload.match(/.{1,4}/g)!.join('-')}`;
+}
+
+function normalizeRegistrationKey(value: unknown): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) throw new HttpError(400, 'Registration key is required.');
+  const normalized = raw.toUpperCase().replace(/[\s-]/g, '');
+  if (!/^KLY1[A-HJ-NP-Z2-9]{32}$/.test(normalized)) {
+    throw new HttpError(403, 'Registration key is invalid.');
+  }
+  return normalized;
+}
+
+async function encryptRegistrationKey(secret: string, plaintext: string): Promise<{ ciphertext: string; iv: string }> {
+  const key = await registrationEncryptionKey(secret, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(new ArrayBuffer(12)));
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
+  return { ciphertext: b64urlBytes(encrypted), iv: b64urlBytes(iv) };
+}
+
+async function decryptRegistrationKey(secret: string, ciphertext: string, encodedIv: string): Promise<string> {
+  try {
+    const key = await registrationEncryptionKey(secret, ['decrypt']);
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: bytesFromB64Url(encodedIv) },
+      key,
+      bytesFromB64Url(ciphertext),
+    );
+    return new TextDecoder().decode(decrypted);
+  } catch {
+    throw new HttpError(503, 'The active registration key cannot be decrypted. Rotate it to create a replacement.');
+  }
+}
+
+async function registrationEncryptionKey(secret: string, usages: KeyUsage[]): Promise<CryptoKey> {
+  const material = await crypto.subtle.digest('SHA-256', enc.encode(`koinly-registration-key:${secret}`));
+  return crypto.subtle.importKey('raw', material, { name: 'AES-GCM' }, false, usages);
+}
+
+async function requireRegistrationAdmin(request: Request, env: Env): Promise<void> {
+  const header = request.headers.get('authorization') ?? '';
+  const supplied = header.toLowerCase().startsWith('bearer ') ? header.slice(7) : '';
+  if (!supplied || (await sha256(supplied)) !== (await sha256(env.REGISTRATION_ADMIN_SECRET))) {
+    throw new HttpError(401, 'Invalid registration administrator credentials.');
+  }
+}
+
+function scheduleRegistrationKeyDelivery(env: Env, context: ExecutionContext, key: RegistrationKeyRecord): void {
+  context.waitUntil((async () => {
+    const deliveryDb = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
+    try {
+      await deliverRegistrationKey(env, deliveryDb, key);
+    } finally {
+      deliveryDb.close();
+    }
+  })());
+}
+
+async function deliverRegistrationKey(env: Env, db: Client, key: RegistrationKeyRecord): Promise<void> {
+  let failure = 'Telegram delivery failed.';
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const attemptedAt = Date.now();
+    const pending = await db.execute({
+      sql: `UPDATE registration_keys
+            SET delivery_status = 'PENDING', delivery_attempts = delivery_attempts + 1,
+                last_delivery_attempt_at = ?, delivery_error = NULL
+            WHERE id = ? AND status = 'ACTIVE'`,
+      args: [attemptedAt, key.id],
+    });
+    if (pending.rowsAffected !== 1) return;
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: env.REGISTRATION_KEY_CHAT_ID,
+          text: registrationKeyTelegramMessage(key),
+          disable_web_page_preview: true,
+        }),
+      });
+      if (!response.ok) throw new Error(`Telegram API returned HTTP ${response.status}.`);
+      await db.execute({
+        sql: `UPDATE registration_keys
+              SET delivery_status = 'DELIVERED', delivered_at = ?, delivery_error = NULL
+              WHERE id = ?`,
+        args: [Date.now(), key.id],
+      });
+      return;
+    } catch (error) {
+      failure = safeDeliveryError(error);
+      if (attempt < 3) await delay(attempt * 1000);
+    }
+  }
+  await db.execute({
+    sql: `UPDATE registration_keys SET delivery_status = 'FAILED', delivery_error = ? WHERE id = ?`,
+    args: [failure, key.id],
+  });
+}
+
+function registrationKeyTelegramMessage(key: RegistrationKeyRecord): string {
+  const generated = new Date(key.createdAt).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+  const expires = new Date(key.expiresAt).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+  return `New Registration Key\n\nKey: ${key.plaintext}\n\nStatus: Active\nPrevious key: ${key.previousStatus}\nGenerated: ${generated}\nExpires: ${expires}`;
+}
+
+function safeDeliveryError(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Telegram delivery failed.';
+  return message.replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[redacted]').replace(/\s+/g, ' ').slice(0, 180);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function registrationKeyRecordFromRow(env: Env, row: Record<string, unknown>, previousStatus: string): Promise<RegistrationKeyRecord> {
+  return {
+    id: String(row.id),
+    plaintext: await decryptRegistrationKey(env.JWT_SECRET, String(row.encrypted_key), String(row.encryption_iv)),
+    keyHash: '',
+    encryptedKey: String(row.encrypted_key),
+    encryptionIv: String(row.encryption_iv),
+    createdAt: Number(row.created_at),
+    expiresAt: Number(row.expires_at),
+    createdBy: String(row.created_by),
+    previousStatus,
+  };
+}
+
+function registrationKeyPublicMetadata(key: RegistrationKeyRecord): Record<string, unknown> {
+  return {
+    id: key.id,
+    status: 'ACTIVE',
+    createdAt: key.createdAt,
+    expiresAt: key.expiresAt,
+    createdBy: key.createdBy,
+  };
+}
+
+function registrationKeyMetadata(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: String(row.id),
+    status: String(row.status),
+    createdAt: Number(row.created_at),
+    expiresAt: row.expires_at == null ? null : Number(row.expires_at),
+    createdBy: String(row.created_by),
+    deliveryStatus: String(row.delivery_status),
+    deliveryAttempts: Number(row.delivery_attempts ?? 0),
+    lastDeliveryAttemptAt: row.last_delivery_attempt_at == null ? null : Number(row.last_delivery_attempt_at),
+    deliveredAt: row.delivered_at == null ? null : Number(row.delivered_at),
+    deliveryError: row.delivery_error == null ? null : String(row.delivery_error),
+  };
+}
+
+function privateJson(value: unknown, status = 200): Response {
+  const response = json(value, status);
+  response.headers.set('cache-control', 'no-store, private');
+  return response;
 }
 
 async function login(request: Request, env: Env, db: Client): Promise<Response> {

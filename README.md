@@ -641,6 +641,9 @@ Worker runtime secrets:
 TURSO_DATABASE_URL
 TURSO_AUTH_TOKEN
 JWT_SECRET
+TELEGRAM_BOT_TOKEN
+REGISTRATION_KEY_CHAT_ID
+REGISTRATION_ADMIN_SECRET
 ```
 
 GitHub Actions deployment expects all deployment values to be stored as
@@ -652,10 +655,13 @@ CLOUDFLARE_ACCOUNT_ID
 TURSO_DATABASE_URL
 TURSO_AUTH_TOKEN
 JWT_SECRET
+TELEGRAM_BOT_TOKEN
+REGISTRATION_KEY_CHAT_ID
+REGISTRATION_ADMIN_SECRET
 ```
 
-The deploy workflow passes `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and
-`JWT_SECRET` to Cloudflare as Worker secrets with `wrangler deploy
+The deploy workflow passes the database, authentication, registration-key,
+and Telegram values to Cloudflare as Worker secrets with `wrangler deploy
 --secrets-file`, so you can manage all deploy-time values from GitHub repo
 Settings > Secrets and variables > Actions.
 
@@ -693,6 +699,57 @@ true`, and `schemaReady: true`. The Worker also runs the idempotent schema
 bootstrap before auth/sync requests, so missing tables are created
 automatically if the GitHub Actions schema step was skipped.
 
+### Invite-only registration
+
+Creating a sync account requires the one active, single-use registration key.
+The Worker validates and consumes that key inside the same database transaction
+that creates the user. A successful registration marks the previous key
+`USED`, creates the next cryptographically random key, stores its SHA-256 hash
+plus an AES-GCM encrypted delivery copy, and sends the new plaintext key to the
+configured Telegram chat. Used, revoked, and expired keys remain in the audit
+ledger and can never become active again.
+
+Add these three repository secrets before deploying:
+
+```text
+TELEGRAM_BOT_TOKEN          # BotFather token
+REGISTRATION_KEY_CHAT_ID    # target Telegram user/group/channel chat ID
+REGISTRATION_ADMIN_SECRET   # independent random value, at least 32 characters
+```
+
+The normal key lifetime is controlled by the non-secret Worker variable
+`REGISTRATION_KEY_TTL_SECONDS`; the included configuration uses 30 days.
+
+The deployment workflow calls the protected `bootstrap` endpoint after each
+deploy. It creates and delivers an initial key only when no valid active key
+exists, so ordinary Worker deployments do not rotate a still-valid key.
+
+To rotate the active key manually, use the command below. It does not return
+the plaintext key; Telegram receives it:
+
+```bash
+curl -X POST "https://YOUR-WORKER.workers.dev/v1/admin/registration-key/rotate" \
+  -H "Authorization: Bearer $REGISTRATION_ADMIN_SECRET"
+```
+
+Protected administrator endpoints:
+
+```text
+GET  /v1/admin/registration-key/status
+GET  /v1/admin/registration-key/reveal
+POST /v1/admin/registration-key/rotate
+POST /v1/admin/registration-key/revoke
+POST /v1/admin/registration-key/retry-delivery
+POST /v1/admin/registration-key/bootstrap
+```
+
+Send `Authorization: Bearer REGISTRATION_ADMIN_SECRET` to each endpoint.
+`status` never returns the key. `reveal` is the emergency retrieval path for
+the current encrypted active key and returns `Cache-Control: no-store`.
+`retry-delivery` safely retries Telegram delivery. The Worker also attempts
+Telegram delivery up to three times and records delivery status without
+rolling back an already-created account.
+
 ---
 
 ## Legacy sync backend
@@ -705,7 +762,7 @@ The old `backend/cloudflare-turso/` snapshot/admin-approval backend is retained 
 
 1. User opens Account & sync.
 2. The app uses the Worker URL embedded at build time through `KOINLY_SYNC_API_BASE_URL`.
-3. User creates an account or signs in.
+3. User creates an account with the current single-use registration key, or signs in.
 4. Create account adopts existing local data into the new account through the outbox.
 5. Login clears local finance data and replaces it with the cloud account data.
 6. Local changes are saved immediately and synced automatically in the background.
@@ -722,7 +779,8 @@ Backend endpoint definitions are in:
 cloud/worker/src/index.ts
 ```
 
-Endpoint groups include auth registration/login/refresh/logout, initial sync, push, pull, and status.
+Endpoint groups include auth registration/login/refresh/logout, initial sync,
+push, pull, status, and protected registration-key administration.
 
 ---
 
@@ -730,7 +788,15 @@ Endpoint groups include auth registration/login/refresh/logout, initial sync, pu
 
 ### Account & sync cannot connect
 
-Check the Worker URL, Turso secrets, `JWT_SECRET`, and whether `cloud/worker/schema.sql` has been applied.
+Check the Worker URL, Turso secrets, `JWT_SECRET`, Telegram registration
+secrets, and whether `cloud/worker/schema.sql` has been applied.
+
+### Registration key was not delivered
+
+Check the active key's protected `status` endpoint. Confirm the bot has access
+to `REGISTRATION_KEY_CHAT_ID`, then call `retry-delivery`. If Telegram remains
+unavailable, use the protected `reveal` endpoint or rotate the active key. Do
+not paste keys, bot tokens, or administrator secrets into public logs.
 
 ### Sync conflict appears
 

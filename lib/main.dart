@@ -2405,15 +2405,21 @@ class AppController extends ChangeNotifier {
     await performMultiDeviceSync(pushLocalChanges: false);
   }
 
-  Future<void> registerSyncAccount({required String email, required String password}) async {
-    await _authenticateSyncAccount(register: true, email: email, password: password);
+  Future<void> registerSyncAccount({required String email, required String password, required String registrationKey}) async {
+    await _authenticateSyncAccount(register: true, email: email, password: password, registrationKey: registrationKey);
   }
 
   Future<void> loginSyncAccount({required String email, required String password, bool preferCloudData = true}) async {
     await _authenticateSyncAccount(register: false, email: email, password: password, preferCloudData: preferCloudData);
   }
 
-  Future<void> _authenticateSyncAccount({required bool register, required String email, required String password, bool preferCloudData = true}) async {
+  Future<void> _authenticateSyncAccount({
+    required bool register,
+    required String email,
+    required String password,
+    String registrationKey = '',
+    bool preferCloudData = true,
+  }) async {
     syncAuthBusy = true;
     cloudSyncError = null;
     syncStatus = register ? 'Creating account...' : 'Signing in...';
@@ -2425,7 +2431,14 @@ class AppController extends ChangeNotifier {
       }
       final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
       final session = register
-          ? await api.register(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName())
+          ? await api.register(
+              email: email,
+              password: password,
+              registrationKey: registrationKey,
+              deviceId: syncDeviceId,
+              deviceName: _deviceName(),
+              platform: _platformName(),
+            )
           : await api.login(email: email, password: password, deviceId: syncDeviceId, deviceName: _deviceName(), platform: _platformName());
       await _saveSyncSession(session);
       await database.writeSyncState('serverCursor', '0');
@@ -11205,7 +11218,7 @@ class _LoansScreenState extends State<LoansScreen> {
               },
             ),
             const SizedBox(height: 10),
-            SleekCyclePillSelector<bool>(
+            SleekPillSelector<bool>(
               options: const [
                 SleekPillOption(value: false, label: 'Open', icon: Icons.pending_actions_rounded),
                 SleekPillOption(value: true, label: 'Completed', icon: Icons.check_circle_rounded),
@@ -12644,6 +12657,7 @@ class MultiDeviceSyncScreen extends StatefulWidget {
 class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
   late final TextEditingController _emailController;
   late final TextEditingController _passwordController;
+  late final TextEditingController _registrationKeyController;
   bool _obscurePassword = true;
   late bool _registerMode;
 
@@ -12653,6 +12667,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
     final state = context.read<AppController>();
     _emailController = TextEditingController(text: state.syncAccountEmail);
     _passwordController = TextEditingController();
+    _registrationKeyController = TextEditingController();
     _registerMode = widget.initialRegisterMode;
   }
 
@@ -12660,6 +12675,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _registrationKeyController.dispose();
     super.dispose();
   }
 
@@ -12673,13 +12689,22 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
       showSnack(context, 'Enter email and password.');
       return;
     }
+    if (register && _registrationKeyController.text.trim().isEmpty) {
+      showSnack(context, 'Enter your registration key.');
+      return;
+    }
     if (register) {
-      await state.registerSyncAccount(email: _emailController.text, password: _passwordController.text);
+      await state.registerSyncAccount(
+        email: _emailController.text,
+        password: _passwordController.text,
+        registrationKey: _registrationKeyController.text,
+      );
     } else {
       await state.loginSyncAccount(email: _emailController.text, password: _passwordController.text, preferCloudData: widget.preferCloudDataOnAuth);
     }
     if (mounted && state.cloudSyncError == null) {
       _passwordController.clear();
+      _registrationKeyController.clear();
       showSnack(context, register ? 'Account created. Sync started.' : 'Signed in. Cloud data loaded.');
       if (widget.completeOnAuth) {
         await state.completeOnboarding();
@@ -12799,6 +12824,22 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                   ),
                 ),
               ),
+            if (!signedIn && _registerMode) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: _registrationKeyController,
+                enabled: !busy,
+                autocorrect: false,
+                enableSuggestions: false,
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(
+                  labelText: 'Registration Key',
+                  hintText: 'KLY1-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX',
+                  helperText: 'A valid single-use invitation key is required.',
+                  prefixIcon: Icon(Icons.key_rounded),
+                ),
+              ),
+            ],
             const SizedBox(height: 16),
             if (!signedIn) ...[
               Text(

@@ -133,6 +133,7 @@ class KoinlySyncApi {
   Future<SyncAuthSession> register({
     required String email,
     required String password,
+    required String registrationKey,
     required String deviceId,
     required String deviceName,
     required String platform,
@@ -140,6 +141,7 @@ class KoinlySyncApi {
     final data = await _post('/v1/auth/register', {
       'email': email,
       'password': password,
+      'registrationKey': registrationKey,
       'deviceId': deviceId,
       'deviceName': deviceName,
       'platform': platform,
