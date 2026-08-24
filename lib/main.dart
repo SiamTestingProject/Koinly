@@ -4481,17 +4481,17 @@ class ResponsiveListContent extends StatelessWidget {
               padding: resolvedPadding,
               physics: optimizedScrollPhysics(context),
               keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-              cacheExtent: kIsDesktopApp ? 1100 : 420,
+              cacheExtent: kIsDesktopApp ? 620 : 420,
+              addAutomaticKeepAlives: false,
+              addSemanticIndexes: false,
               itemCount: header.length + bodyCount,
               itemBuilder: (context, index) {
-                if (index < header.length) return RepaintBoundary(child: header[index]);
+                if (index < header.length) return header[index];
                 final bodyIndex = index - header.length;
-                if (itemCount == 0) return RepaintBoundary(child: empty!);
-                return RepaintBoundary(
-                  child: Padding(
-                    padding: EdgeInsets.only(bottom: itemSpacing),
-                    child: itemBuilder(context, bodyIndex),
-                  ),
+                if (itemCount == 0) return empty!;
+                return Padding(
+                  padding: EdgeInsets.only(bottom: itemSpacing),
+                  child: itemBuilder(context, bodyIndex),
                 );
               },
             ),
@@ -14920,6 +14920,8 @@ class _KoinlyLicenseScreenState extends State<KoinlyLicenseScreen> {
                   child: ListView.builder(
                     padding: padding,
                     physics: optimizedScrollPhysics(context),
+                    addAutomaticKeepAlives: false,
+                    addSemanticIndexes: false,
                     itemCount: licenses.length + 1,
                     itemBuilder: (context, index) {
                       if (index == 0) {
@@ -15058,6 +15060,8 @@ class _KoinlyLicenseDetailScreenState extends State<KoinlyLicenseDetailScreen> {
                     child: ListView.builder(
                       padding: padding,
                       physics: optimizedScrollPhysics(context),
+                      addAutomaticKeepAlives: false,
+                      addSemanticIndexes: false,
                       itemCount: entries.length + 1,
                       itemBuilder: (context, index) {
                         if (index == 0) {

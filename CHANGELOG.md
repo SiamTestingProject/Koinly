@@ -6,6 +6,7 @@
 
 - Other signed-in devices now automatically pull cloud changes while the app is open and whenever the app resumes, so new transactions appear across devices without manual restore.
 - Login/cloud restore now removes untouched starter Cash/Card/Bank Account placeholders from the restored local copy, even when real cloud data also exists.
+- Long scrolling lists now avoid duplicate row repaint boundaries, unnecessary keep-alive bookkeeping, and semantic index calculations that made Windows scrolling feel choppier.
 - Android no longer reopens the package installer for a downloaded update after that same version is already installed.
 - Latest release changelog now publishes only the current update notes instead of the full accumulated development history.
 - Made Account & sync uploads more reliable by giving full restore uploads a longer request timeout and replacing raw timeout exceptions with clean user-facing messages.
@@ -17,6 +18,7 @@
 - Release notes are grouped by current changes, additions, removals, and fixes so the in-app updater shows only the useful “what changed in this update” text.
 - Renamed the Account & sync upload button to “Upload restored data” whenever a restored local backup still needs to become the cloud source of truth.
 - Desktop card surfaces now avoid animated container work, heavy shadows, and per-card gradients during normal rendering for smoother Windows scrolling.
+- Desktop list preloading was reduced so fast scrolling builds fewer off-screen finance cards at once.
 
 ### Previous development history
 

@@ -114,6 +114,7 @@ Release notes come from `CHANGELOG.md`. The workflow first looks for the current
 - Page transitions now use shorter fade-only motion, and the heavy background glow layers were removed to reduce animation jank on both Windows and Android.
 - Advanced settings includes Performance mode. It is enabled by default on desktop and reduces page transitions, press animations, animated card changes, update-wave animation, gradients, and heavy shadows.
 - Desktop card lists use static card containers with lighter visual effects so account/category/transaction scrolling has less GPU and layout work.
+- Long finance lists disable unnecessary keep-alive and semantic-index bookkeeping and rely on the framework's built-in row repaint isolation instead of adding duplicate repaint boundaries.
 - Desktop page headers are slightly more compact than mobile headers so Windows layouts feel less oversized.
 
 ---
