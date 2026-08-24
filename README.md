@@ -435,6 +435,17 @@ Important classification fields include transaction type, account IDs, category 
 
 ---
 
+## Loan workflow
+
+Koinly supports two loan directions:
+
+- **Given loans** track money someone owes you. Creating one reduces the selected account balance, and repayments increase it later.
+- **Taken loans** track money you owe someone else. Creating one increases the selected account balance, and repayments reduce it later.
+
+Loan records support repayment history, repayment reminders, overdue alerts, institution/provider details, account/agreement numbers, interest rate, local backup/restore, and account-based cloud sync.
+
+---
+
 ## Requirements
 
 Android:

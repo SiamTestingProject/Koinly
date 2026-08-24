@@ -11188,7 +11188,7 @@ class _LoansScreenState extends State<LoansScreen> {
     final totalRemaining = typeLoans.fold<double>(0, (s, l) => s + l.remainingAmount);
     return PageScaffold(
       title: 'Loans',
-      subtitle: type == LoanType.given ? 'Money you gave' : 'Money you borrowed',
+      subtitle: type == LoanType.given ? 'Track money others owe you' : 'Track money you owe others',
       child: ResponsiveContent(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -11212,6 +11212,24 @@ class _LoansScreenState extends State<LoansScreen> {
               ],
               selected: completed,
               onChanged: (v) => setState(() => completed = v),
+            ),
+            const SizedBox(height: 14),
+            ExpressiveCard(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  iconBubble(context, type == LoanType.given ? 'loan_given' : 'loan_taken', type == LoanType.given ? '#FF7A7A' : '#38BDF8', size: 48),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      type == LoanType.given
+                          ? 'Given loans reduce the selected account now, then repayments increase it later.'
+                          : 'Taken loans increase the selected account now, then repayments reduce it later.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 14),
             ExpressiveCard(child: Column(children: [
@@ -11247,10 +11265,16 @@ class _LoansScreenState extends State<LoansScreen> {
             ],
             const SectionHeader('Loan records'),
             if (visible.isEmpty)
-              const EmptyCard(
+              EmptyCard(
                 icon: Icons.handshake_rounded,
-                title: 'No loans here',
-                body: 'Create a loan. The selected account balance will update directly without adding income or expense records.',
+                title: completed ? 'No completed loans' : 'No open loans yet',
+                body: completed
+                    ? 'Finished loans will move here after the full amount is repaid.'
+                    : type == LoanType.given
+                        ? 'Add money you gave to someone. Koinly will track what remains and remind you about repayments.'
+                        : 'Add money you borrowed. Koinly will track what remains and remind you when to pay.',
+                action: completed ? null : () => showLoanEditor(context, initialType: type),
+                actionLabel: type == LoanType.given ? 'Add given loan' : 'Add taken loan',
               )
             else
               ...visible.map((loan) => Padding(padding: const EdgeInsets.only(bottom: 10), child: LoanTile(loan: loan))),
@@ -11327,6 +11351,7 @@ class LoanTile extends StatelessWidget {
     final overdue = reminders.any((r) => r.isOverdue);
     final nextReminder = reminders.where((r) => !r.isPaid).toList()..sort((a, b) => a.dueDate.compareTo(b.dueDate));
     final accent = overdue ? kSleekExpense : (loan.type == LoanType.given ? const Color(0xFFFF7A7A) : const Color(0xFF38BDF8));
+    final paidPercent = loan.amount <= 0 ? 0 : ((loan.repaidAmount / loan.amount) * 100).clamp(0, 100).round();
     return ExpressiveCard(
       color: overdue
           ? (Theme.of(context).brightness == Brightness.dark ? const Color(0xFF2A1719) : const Color(0xFFFFF0F0))
@@ -11341,7 +11366,17 @@ class LoanTile extends StatelessWidget {
               iconBubble(context, loan.type == LoanType.given ? 'loan_given' : 'loan_taken', colorToHex(accent), size: 46),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(loan.personName, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17), maxLines: 1, overflow: TextOverflow.ellipsis),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(loan.personName, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17), maxLines: 1, overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 2),
+                    Text(
+                      loan.type == LoanType.given ? 'Someone owes you' : 'You owe this',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
+                    ),
+                  ],
+                ),
               ),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
@@ -11363,11 +11398,20 @@ class LoanTile extends StatelessWidget {
             ),
             const SizedBox(height: 9),
             Text(
-              '${state.format(loan.repaidAmount)} repaid of ${state.format(loan.amount)} • ${DateFormat('MMM d, yyyy').format(loan.loanDate)}',
+              '$paidPercent% repaid • ${state.format(loan.repaidAmount)} of ${state.format(loan.amount)} • ${DateFormat('MMM d, yyyy').format(loan.loanDate)}',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
             ),
+            if (loan.institution.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                loan.institution,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
+              ),
+            ],
             if (nextReminder.isNotEmpty) ...[
               const SizedBox(height: 4),
               Text(
@@ -11419,6 +11463,26 @@ class LoanDetailScreen extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 LoanTile(loan: loan),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: loan.isCompleted ? null : () => showRepaymentEditor(context, loan),
+                        icon: const Icon(Icons.payments_rounded),
+                        label: Text(loan.type == LoanType.given ? 'Record received' : 'Record payment'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => showLoanEditor(context, loan: loan),
+                        icon: const Icon(Icons.edit_rounded),
+                        label: const Text('Edit loan'),
+                      ),
+                    ),
+                  ],
+                ),
                 const SectionHeader('Details'),
                 ExpressiveCard(child: Column(children: [
                   _detailRow(loan.type == LoanType.given ? 'Paid from' : 'Received into', state.accountOf(loan.accountId)?.name ?? 'Unknown'),
@@ -11466,6 +11530,21 @@ Future<void> showLoanEditor(BuildContext context, {Loan? loan, LoanType initialT
     maxHeight: 700,
     child: LoanEditor(loan: loan, initialType: initialType),
   );
+}
+
+Future<bool> confirmDeleteLoan(BuildContext context, Loan loan) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: const Text('Delete this loan?'),
+      content: Text('This removes ${loan.personName}, repayment history, reminders, and reverses the loan balance changes from the selected accounts.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+      ],
+    ),
+  );
+  return confirmed == true;
 }
 
 class LoanEditor extends StatefulWidget {
@@ -11537,6 +11616,7 @@ class _LoanEditorState extends State<LoanEditor> {
   Widget build(BuildContext context) {
     final state = context.watch<AppController>();
     final accountOptions = state.operatingAccounts.isEmpty ? state.accounts : state.operatingAccounts;
+    final hasAccountOptions = accountOptions.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
       child: SingleChildScrollView(
@@ -11559,6 +11639,16 @@ class _LoanEditorState extends State<LoanEditor> {
             const SizedBox(height: 12),
             TextField(controller: amount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Loan amount')),
             const SizedBox(height: 12),
+            if (!hasAccountOptions) ...[
+              EmptyCard(
+                icon: Icons.account_balance_wallet_rounded,
+                title: 'Create an account first',
+                body: 'A loan needs an account so Koinly knows which balance should increase or decrease.',
+                action: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AccountListScreen())),
+                actionLabel: 'Open accounts',
+              ),
+              const SizedBox(height: 12),
+            ],
             AppleSelectionField(
               label: type == LoanType.given ? 'Paid from account' : 'Receive money into account',
               option: accountOptions.where((a) => a.id == accountId).firstOrNull == null ? null : optionFromAccount(accountOptions.where((a) => a.id == accountId).first, state),
@@ -11654,11 +11744,13 @@ class _LoanEditorState extends State<LoanEditor> {
             ),
             const SizedBox(height: 18),
             Row(children: [
-              if (widget.loan != null) Expanded(child: OutlinedButton(onPressed: () async { await state.deleteLoan(widget.loan!.id); if (context.mounted) Navigator.pop(context); }, child: const Text('Delete'))),
+              if (widget.loan != null) Expanded(child: OutlinedButton(onPressed: () async { final confirmed = await confirmDeleteLoan(context, widget.loan!); if (!confirmed) return; await state.deleteLoan(widget.loan!.id); if (context.mounted) Navigator.pop(context); }, child: const Text('Delete'))),
               if (widget.loan != null) const SizedBox(width: 12),
               Expanded(flex: 2, child: FilledButton(onPressed: () async {
                 final value = double.tryParse(amount.text) ?? 0;
-                if (value <= 0 || person.text.trim().isEmpty || accountId == null) return;
+                if (person.text.trim().isEmpty) return showSnack(context, type == LoanType.given ? 'Enter the borrower name.' : 'Enter the lender name.');
+                if (value <= 0) return showSnack(context, 'Enter a valid loan amount.');
+                if (accountId == null) return showSnack(context, 'Choose the account this loan affects.');
                 final now = DateTime.now();
                 final loanId = widget.loan?.id ?? _uuid.v4();
                 final loan = Loan(
@@ -11685,8 +11777,11 @@ class _LoanEditorState extends State<LoanEditor> {
                     .map((draft) => draft.toReminder(loanId: loan.id, accountId: accountId!, now: now))
                     .toList();
                 await state.replaceLoanRepaymentReminders(loan.id, reminders);
-                if (context.mounted) Navigator.pop(context);
-              }, child: const Text('Save'))),
+                if (context.mounted) {
+                  showSnack(context, widget.loan == null ? 'Loan created.' : 'Loan updated.');
+                  Navigator.pop(context);
+                }
+              }, child: Text(widget.loan == null ? 'Create loan' : 'Save loan'))),
             ]),
           ],
         ),
@@ -11860,17 +11955,51 @@ class _RepaymentEditorState extends State<RepaymentEditor> {
   }
 
   @override
+  void dispose() {
+    amount.dispose();
+    notes.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final state = context.watch<AppController>();
     final accountOptions = state.operatingAccounts.isEmpty ? state.accounts : state.operatingAccounts;
+    final hasAccountOptions = accountOptions.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
       child: SingleChildScrollView(
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Text(widget.loan.type == LoanType.given ? 'Repayment received' : 'Repayment paid', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
           const SizedBox(height: 16),
+          ExpressiveCard(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                iconBubble(context, widget.loan.type == LoanType.given ? 'loan_given' : 'loan_taken', widget.loan.type == LoanType.given ? '#27D17F' : '#FF5353', size: 46),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    widget.loan.type == LoanType.given
+                        ? 'Record money you received back from ${widget.loan.personName}.'
+                        : 'Record money you paid back to ${widget.loan.personName}.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
           TextField(controller: amount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Repayment amount')),
           const SizedBox(height: 12),
+          if (!hasAccountOptions) ...[
+            const EmptyCard(
+              icon: Icons.account_balance_wallet_rounded,
+              title: 'No account available',
+              body: 'Create an account before recording a repayment.',
+            ),
+            const SizedBox(height: 12),
+          ],
           AppleSelectionField(
             label: widget.loan.type == LoanType.given ? 'Receive repayment into account' : 'Pay repayment from account',
             option: accountOptions.where((a) => a.id == accountId).firstOrNull == null ? null : optionFromAccount(accountOptions.where((a) => a.id == accountId).first, state),
@@ -11899,10 +12028,14 @@ class _RepaymentEditorState extends State<RepaymentEditor> {
           const SizedBox(height: 18),
           FilledButton(onPressed: () async {
             final value = double.tryParse(amount.text) ?? 0;
-            if (value <= 0 || accountId == null) return;
+            if (value <= 0) return showSnack(context, 'Enter a valid repayment amount.');
+            if (accountId == null) return showSnack(context, 'Choose the account this repayment affects.');
             final repayment = LoanRepayment(id: _uuid.v4(), loanId: widget.loan.id, accountId: accountId!, amount: value, paidOn: paidOn, notes: notes.text.trim(), createdOn: DateTime.now());
             await state.addRepayment(widget.loan, repayment, accountId!);
-            if (context.mounted) Navigator.pop(context);
+            if (context.mounted) {
+              showSnack(context, widget.loan.type == LoanType.given ? 'Repayment received.' : 'Repayment recorded.');
+              Navigator.pop(context);
+            }
           }, child: const Text('Save repayment')),
         ]),
       ),

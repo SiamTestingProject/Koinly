@@ -10,9 +10,11 @@
 ### Fixed
 
 - Latest release changelog now publishes only the current update notes instead of the full accumulated development history.
+- Loan create/edit and repayment dialogs now show clear user-facing messages when required fields are missing instead of silently doing nothing.
 
 ### Changed
 
+- Loan screens now use friendlier wording, direct empty-state actions, clearer repayment progress, visible repayment action buttons, and a delete confirmation.
 - Added a Pursenal-style Load backup workflow in Settings that opens a file picker, loads a `.koinlybackup` file, replaces local data, and triggers the existing cloud-upload path when signed in.
 - Android package/application ID changed from `com.siamapps.koinly` to `com.koinly.siam`.
 - Transaction amount entry now uses the normal phone/desktop keyboard instead of Koinly's old custom on-screen keypad.
