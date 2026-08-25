@@ -1596,7 +1596,12 @@ class AppController extends ChangeNotifier {
     }
     syncAccessToken = await secureCredentials.readAccessToken();
     syncRefreshToken = await secureCredentials.readRefreshToken();
-    cloudSyncEnabled = syncAccessToken.isNotEmpty && syncRefreshToken.isNotEmpty;
+    cloudSyncEnabled = (syncAccessToken.isNotEmpty && syncRefreshToken.isNotEmpty) ||
+        (cloudSyncEnabled &&
+            syncDatabaseProvider == SyncDatabaseProvider.turso &&
+            cloudSyncApiBaseUrl.isNotEmpty &&
+            cloudSyncId.isNotEmpty &&
+            cloudSyncPin.isNotEmpty);
     final lastSyncRaw = await prefs.getString('cloudSyncLastAt', '');
     cloudSyncLastAt = lastSyncRaw.isEmpty ? null : DateTime.tryParse(lastSyncRaw);
     cloudSyncPending = await prefs.getBool('cloudSyncPending', false);
@@ -1890,6 +1895,7 @@ class AppController extends ChangeNotifier {
       'cloudSyncApiBaseUrl',
       'cloudSyncId',
       'cloudSyncPin',
+      'syncDatabaseProvider',
       'syncAccountEmail',
       'syncDeviceId',
     };
@@ -1921,12 +1927,15 @@ class AppController extends ChangeNotifier {
     if (cloudSyncPending) return 'Sync pending • Waiting for internet';
     if (cloudSyncErrorCode == 'SYNC_APPROVAL_REQUIRED') return 'Online sync • Admin approval required';
     if (cloudSyncError != null && cloudSyncError!.trim().isNotEmpty) return 'Sync error • $cloudSyncError';
-    if (!cloudSyncEnabled) return 'Sign in required';
-    if (cloudSyncLastAt == null) return 'Signed in • Not synced yet';
+    if (!cloudSyncEnabled) return 'Sync not configured';
+    if (cloudSyncLastAt == null) return _usesPersonalSync ? 'Personal Turso sync ready' : 'Signed in • Not synced yet';
     return 'Synced • ${DateFormat('yyyy-MM-dd HH:mm').format(cloudSyncLastAt!.toLocal())}';
   }
 
   bool get cloudSyncApprovalRequired => cloudSyncErrorCode == 'SYNC_APPROVAL_REQUIRED';
+
+  String get personalTursoWorkerUrl =>
+      syncDatabaseProvider == SyncDatabaseProvider.turso && cloudSyncApiBaseUrl != CloudSyncService.configuredApiBaseUrl ? cloudSyncApiBaseUrl : '';
 
   bool get hasAvailableUpdate => updateCheckOutcome == UpdateCheckOutcome.updateAvailable && latestGithubRelease != null;
   bool get hasPendingAndroidUpdate => pendingAndroidUpdatePath.isNotEmpty && pendingAndroidUpdateVersion.isNotEmpty && !_isPendingAndroidUpdateAlreadyInstalled();
@@ -2221,13 +2230,16 @@ class AppController extends ChangeNotifier {
 
   Future<void> configureCloudSync({required bool enabled, required String apiBaseUrl, required String syncId, required String pin}) async {
     // Automatic sync is always on once an online sync method is configured.
-    cloudSyncEnabled = true;
+    cloudSyncEnabled = enabled;
+    syncDatabaseProvider = SyncDatabaseProvider.turso;
     cloudSyncApiBaseUrl = CloudSyncService.resolveApiBaseUrl(apiBaseUrl);
     cloudSyncId = CloudSyncService.normalizeSyncId(syncId);
     cloudSyncPin = pin.trim();
+    syncStatus = 'Personal Turso sync ready';
     cloudSyncError = null;
     cloudSyncErrorCode = null;
     await prefs.setBool('cloudSyncEnabled', cloudSyncEnabled);
+    await prefs.setEnum('syncDatabaseProvider', syncDatabaseProvider);
     await prefs.setString('cloudSyncApiBaseUrl', cloudSyncApiBaseUrl);
     await prefs.setString('cloudSyncId', cloudSyncId);
     await secureCredentials.writeCloudSyncPin(cloudSyncPin);
@@ -2348,9 +2360,15 @@ class AppController extends ChangeNotifier {
       await CloudSyncService.upload(apiBaseUrl: cloudSyncApiBaseUrl, syncId: cloudSyncId, pin: cloudSyncPin, payload: payload);
       cloudSyncLastAt = DateTime.now();
       await prefs.setString('cloudSyncLastAt', cloudSyncLastAt!.toIso8601String());
+      await _setCloudSyncPending(false);
+      authoritativeCloudUploadPending = false;
+      await prefs.setBool('authoritativeCloudUploadPending', false);
+      syncStatus = 'Synced';
     } catch (error) {
       cloudSyncError = _cleanSyncError(error);
       cloudSyncErrorCode = error is CloudSyncException ? error.code : null;
+      await _setCloudSyncPending(true);
+      syncStatus = 'Sync error';
     } finally {
       cloudSyncBusy = false;
       notifyListeners();
@@ -2383,6 +2401,8 @@ class AppController extends ChangeNotifier {
       await (await prefs.prefs).remove('cloudSyncPin');
       cloudSyncLastAt = DateTime.now();
       await prefs.setString('cloudSyncLastAt', cloudSyncLastAt!.toIso8601String());
+      await _setCloudSyncPending(false);
+      syncStatus = 'Synced';
       await reload(queueSync: false);
     } catch (error) {
       cloudSyncError = _cleanSyncError(error);
@@ -2394,6 +2414,10 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> syncToCloud({bool force = false, bool silent = false}) async {
+    if (_usesPersonalSync) {
+      await syncMainOnlineToCloud(force: force);
+      return;
+    }
     if (authoritativeCloudUploadPending) {
       await uploadAuthoritativeCloudData(silent: silent);
       return;
@@ -2402,6 +2426,10 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> syncFromCloud() async {
+    if (_usesPersonalSync) {
+      await syncMainOnlineFromCloud();
+      return;
+    }
     await performMultiDeviceSync(pushLocalChanges: false);
   }
 
@@ -2664,9 +2692,9 @@ class AppController extends ChangeNotifier {
     await prefs.setBool('authoritativeCloudUploadPending', true);
     await _setCloudSyncPending(true);
     if (_hasConfiguredSyncTarget()) {
-      await uploadAuthoritativeCloudData();
+      await syncToCloud();
     } else {
-      syncStatus = 'Restore complete • Sign in to upload restored data';
+      syncStatus = 'Restore complete • Configure sync to upload restored data';
       notifyListeners();
     }
   }
@@ -2674,7 +2702,7 @@ class AppController extends ChangeNotifier {
   Future<void> uploadAuthoritativeCloudData({bool silent = false}) async {
     if (!_hasConfiguredSyncTarget()) {
       if (!silent) {
-        syncStatus = 'Restore complete • Sign in to upload restored data';
+        syncStatus = 'Restore complete • Configure sync to upload restored data';
         notifyListeners();
       }
       return;
@@ -2753,8 +2781,19 @@ class AppController extends ChangeNotifier {
     };
   }
 
-  bool _hasConfiguredSyncTarget() =>
+  bool get _hasConfiguredAccountSyncTarget =>
       cloudSyncEnabled && cloudSyncApiBaseUrl.trim().isNotEmpty && syncAccessToken.trim().isNotEmpty && syncRefreshToken.trim().isNotEmpty;
+
+  bool get _hasConfiguredPersonalSyncTarget =>
+      cloudSyncEnabled &&
+      syncDatabaseProvider == SyncDatabaseProvider.turso &&
+      cloudSyncApiBaseUrl.trim().isNotEmpty &&
+      cloudSyncId.trim().isNotEmpty &&
+      cloudSyncPin.trim().isNotEmpty;
+
+  bool get _usesPersonalSync => !_hasConfiguredAccountSyncTarget && syncDatabaseProvider == SyncDatabaseProvider.turso;
+
+  bool _hasConfiguredSyncTarget() => _hasConfiguredAccountSyncTarget || _hasConfiguredPersonalSyncTarget;
 
   String _deviceName() {
     if (kIsWeb) return 'Koinly Web';
@@ -2783,7 +2822,7 @@ class AppController extends ChangeNotifier {
   void _schedulePendingSyncRetry({bool immediate = false}) {
     if (!_hasConfiguredSyncTarget()) return;
     if (immediate && cloudSyncPending && !cloudSyncBusy) {
-      unawaited(authoritativeCloudUploadPending ? uploadAuthoritativeCloudData(silent: true) : syncToCloud(silent: true));
+      unawaited(syncToCloud(silent: true));
     }
     _cloudSyncRetryTimer ??= Timer.periodic(const Duration(seconds: 30), (_) {
       if (!cloudSyncPending) {
@@ -2792,13 +2831,13 @@ class AppController extends ChangeNotifier {
         return;
       }
       if (!cloudSyncBusy && _hasConfiguredSyncTarget()) {
-        unawaited(authoritativeCloudUploadPending ? uploadAuthoritativeCloudData(silent: true) : syncToCloud(silent: true));
+        unawaited(syncToCloud(silent: true));
       }
     });
   }
 
   void _startCloudAutoPull() {
-    if (!_hasConfiguredSyncTarget()) {
+    if (!_hasConfiguredAccountSyncTarget) {
       _stopCloudAutoPull();
       return;
     }
@@ -2815,7 +2854,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> syncCloudChangesIfIdle({bool force = false}) async {
-    if (!_hasConfiguredSyncTarget() || syncAuthBusy || updateDownloadBusy) return;
+    if (!_hasConfiguredAccountSyncTarget || syncAuthBusy || updateDownloadBusy) return;
     if (_syncInProgress || cloudSyncBusy) return;
     final now = DateTime.now();
     if (!force && _lastCloudAutoPullAt != null && now.difference(_lastCloudAutoPullAt!) < const Duration(seconds: 12)) return;
@@ -12076,7 +12115,17 @@ class SettingsScreen extends StatelessWidget {
             SettingsTile(icon: Icons.payments_rounded, title: 'Currency customization', subtitle: '${state.currencyCode} • ${state.currencyPosition == CurrencyPosition.prefix ? 'Prefix' : 'Suffix'}', color: '#78D8E8', onTap: () => showCurrencySheet(context)),
             SettingsTile(icon: Icons.notifications_active_rounded, title: 'Reminder notification', subtitle: state.reminderEnabled ? 'Daily at ${state.reminderTime.format(context)}' : 'Disabled', color: '#FBC879', onTap: () => showReminderSheet(context)),
             SettingsTile(icon: Icons.lightbulb_rounded, title: 'Savings suggestion profile', subtitle: state.savingsSuggestionProfile.shortLabel, color: '#FFB5D0', onTap: () => showSavingsSuggestionProfileSheet(context)),
-            SettingsTile(icon: Icons.cloud_sync_rounded, title: 'Account & sync', subtitle: state.cloudSyncEnabled ? '${state.syncStatus} • ${state.syncAccountEmail}' : 'Sign in for multi-device sync', color: '#78D8E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MultiDeviceSyncScreen()))),
+            SettingsTile(
+              icon: Icons.cloud_sync_rounded,
+              title: 'Account & sync',
+              subtitle: state.syncAccountEmail.isNotEmpty
+                  ? '${state.syncStatus} • ${state.syncAccountEmail}'
+                  : state.cloudSyncEnabled && state.syncDatabaseProvider == SyncDatabaseProvider.turso
+                      ? 'Personal Turso Worker • ${state.syncStatus}'
+                      : 'Login or use your own Turso Worker',
+              color: '#78D8E8',
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MultiDeviceSyncScreen())),
+            ),
             SettingsTile(icon: Icons.system_update_alt_rounded, title: 'Updates', subtitle: state.updateStatusMessage, color: '#00D7E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const UpdatesScreen()))),
             SettingsTile(icon: Icons.filter_alt_rounded, title: 'Default date filter', subtitle: _dateRangeLabel(state.dateRangeType), color: '#B4A5FF', onTap: () => showDateRangeSheet(context)),
             SettingsTile(icon: Icons.ios_share_rounded, title: 'Export', subtitle: 'CSV / PDF reports with current filters', color: '#FFB5D0', onTap: () => showExportSheet(context)),
@@ -12894,6 +12943,11 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                     icon: Icon(_registerMode ? Icons.login_rounded : Icons.person_add_alt_rounded),
                     label: Text(_registerMode ? 'Use login instead' : 'Create account instead'),
                   ),
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CloudSyncScreen())),
+                    icon: const Icon(Icons.cloud_rounded),
+                    label: const Text('Use own Turso Worker'),
+                  ),
                 ],
               ),
           ],
@@ -12911,6 +12965,7 @@ class CloudSyncScreen extends StatefulWidget {
 }
 
 class _CloudSyncScreenState extends State<CloudSyncScreen> {
+  late final TextEditingController _apiBaseUrlController;
   late final TextEditingController _syncIdController;
   late final TextEditingController _pinController;
   bool _obscurePin = true;
@@ -12919,27 +12974,35 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   void initState() {
     super.initState();
     final state = context.read<AppController>();
+    _apiBaseUrlController = TextEditingController(text: state.personalTursoWorkerUrl);
     _syncIdController = TextEditingController(text: state.cloudSyncId);
     _pinController = TextEditingController(text: state.cloudSyncPin);
   }
 
   @override
   void dispose() {
+    _apiBaseUrlController.dispose();
     _syncIdController.dispose();
     _pinController.dispose();
     super.dispose();
   }
 
-  Future<void> _saveSettings({bool showStatus = true}) async {
+  Future<bool> _saveSettings({bool showStatus = true}) async {
     final state = context.read<AppController>();
+    final workerUrl = CloudSyncService.normalizeApiBaseUrl(_apiBaseUrlController.text);
+    final uri = Uri.tryParse(workerUrl);
+    if (uri == null || !uri.hasAuthority || (uri.scheme != 'https' && uri.scheme != 'http')) {
+      showSnack(context, 'Enter a valid Cloudflare Worker URL.');
+      return false;
+    }
     await state.configureCloudSync(
       enabled: true,
-      apiBaseUrl: state.cloudSyncApiBaseUrl,
+      apiBaseUrl: workerUrl,
       syncId: _syncIdController.text,
       pin: _pinController.text,
     );
-    if (!mounted || !showStatus) return;
-    showSnack(context, 'Online sync settings saved.');
+    if (mounted && showStatus) showSnack(context, 'Online sync settings saved.');
+    return true;
   }
 
   Future<void> _syncNow() async {
@@ -12948,7 +13011,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   }
 
   Future<void> _uploadNow() async {
-    await _saveSettings(showStatus: false);
+    if (!await _saveSettings(showStatus: false)) return;
     final state = context.read<AppController>();
     await state.syncMainOnlineToCloud(force: true);
     if (!mounted) return;
@@ -12970,7 +13033,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
       ),
     );
     if (confirmed != true) return;
-    await _saveSettings(showStatus: false);
+    if (!await _saveSettings(showStatus: false)) return;
     final state = context.read<AppController>();
     await state.syncMainOnlineFromCloud();
     if (!mounted) return;
@@ -13024,7 +13087,8 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   Widget build(BuildContext context) {
     final state = context.watch<AppController>();
     return PageScaffold(
-      title: 'Online data sync',
+      title: 'Personal Turso sync',
+      subtitle: 'No Koinly account required',
       actions: [
         Material(
           color: Colors.transparent,
@@ -13049,6 +13113,18 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            TextField(
+              controller: _apiBaseUrlController,
+              keyboardType: TextInputType.url,
+              textInputAction: TextInputAction.next,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: 'Cloudflare Worker URL',
+                hintText: 'https://your-koinly-sync.workers.dev',
+                prefixIcon: Icon(Icons.link_rounded),
+              ),
+            ),
+            const SizedBox(height: 10),
             TextField(
               controller: _syncIdController,
               textInputAction: TextInputAction.next,
@@ -13078,7 +13154,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
             ],
             const SizedBox(height: 16),
             FilledButton.icon(
-              onPressed: state.cloudSyncBusy || state.syncDatabaseProvider == SyncDatabaseProvider.local ? null : _syncNow,
+              onPressed: state.cloudSyncBusy ? null : _syncNow,
               icon: state.cloudSyncBusy
                   ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                   : const Icon(Icons.cloud_sync_rounded),
@@ -13086,13 +13162,13 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
             ),
             const SizedBox(height: 10),
             OutlinedButton.icon(
-              onPressed: state.cloudSyncBusy || state.syncDatabaseProvider == SyncDatabaseProvider.local ? null : _uploadNow,
+              onPressed: state.cloudSyncBusy ? null : _uploadNow,
               icon: const Icon(Icons.cloud_upload_rounded),
               label: const Text('Upload Data'),
             ),
             const SizedBox(height: 14),
             Text(
-              'Important: Sync downloads/restores the latest database data to this device. Upload Data uploads this device’s local data to the configured database. Automatic sync still runs after local changes once a database method is configured. Conflict handling is last-upload-wins.',
+              'The Worker keeps Turso credentials private. Sync downloads and replaces this device’s local data; Upload Data sends this device’s current snapshot. Conflict handling is last-upload-wins.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
             ),
           ],
@@ -13210,7 +13286,9 @@ class _SyncDatabaseProviderConfigScreenState extends State<SyncDatabaseProviderC
   void initState() {
     super.initState();
     final state = context.read<AppController>();
-    _apiBaseUrlController = TextEditingController(text: state.cloudSyncApiBaseUrl);
+    _apiBaseUrlController = TextEditingController(
+      text: _provider == SyncDatabaseProvider.turso ? state.personalTursoWorkerUrl : state.cloudSyncApiBaseUrl,
+    );
     _mongoUrlController = TextEditingController(text: state.syncMongoDbUrl);
     _mongoDatabaseController = TextEditingController(text: state.syncMongoDatabaseName);
     _mongoCollectionController = TextEditingController(text: state.syncMongoCollectionName);
@@ -13447,15 +13525,6 @@ class _SyncDatabaseProviderConfigScreenState extends State<SyncDatabaseProviderC
     );
   }
 
-  Widget _hiddenTursoNotice() {
-    return ExpressiveCard(
-      key: const ValueKey('turso-hidden'),
-      padding: const EdgeInsets.all(16),
-      child: const Text('Turso Database is hidden for users for now. Choose another database method.'),
-    );
-  }
-
-
   Widget _providerFields() {
     switch (_provider) {
       case SyncDatabaseProvider.local:
@@ -13490,7 +13559,7 @@ class _SyncDatabaseProviderConfigScreenState extends State<SyncDatabaseProviderC
           ],
         );
       case SyncDatabaseProvider.turso:
-        return _hiddenTursoNotice();
+        return _workerBackedProviderFields(_provider);
       case SyncDatabaseProvider.cloudflareD1:
       case SyncDatabaseProvider.supabase:
       case SyncDatabaseProvider.neonPostgres:
@@ -13515,7 +13584,7 @@ class _ProviderSyncActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isCloudProvider = provider != SyncDatabaseProvider.local && provider != SyncDatabaseProvider.turso;
+    final isCloudProvider = provider != SyncDatabaseProvider.local;
     final disabled = busy || !isCloudProvider;
     return ExpressiveCard(
       padding: const EdgeInsets.all(14),
@@ -13585,8 +13654,10 @@ class _SyncAdvancedDatabasePopupState extends State<SyncAdvancedDatabasePopup> {
   void initState() {
     super.initState();
     final state = context.read<AppController>();
-    _provider = state.syncDatabaseProvider == SyncDatabaseProvider.turso ? SyncDatabaseProvider.local : state.syncDatabaseProvider;
-    _apiBaseUrlController = TextEditingController(text: state.cloudSyncApiBaseUrl);
+    _provider = state.syncDatabaseProvider;
+    _apiBaseUrlController = TextEditingController(
+      text: _provider == SyncDatabaseProvider.turso ? state.personalTursoWorkerUrl : state.cloudSyncApiBaseUrl,
+    );
     _mongoUrlController = TextEditingController(text: state.syncMongoDbUrl);
     _mongoDatabaseController = TextEditingController(text: state.syncMongoDatabaseName);
     _mongoCollectionController = TextEditingController(text: state.syncMongoCollectionName);
@@ -13743,14 +13814,6 @@ class _SyncAdvancedDatabasePopupState extends State<SyncAdvancedDatabasePopup> {
     );
   }
 
-  Widget _hiddenTursoNotice() {
-    return ExpressiveCard(
-      key: const ValueKey('turso-hidden-advanced'),
-      padding: const EdgeInsets.all(16),
-      child: const Text('Turso Database is hidden for users for now. Choose another database method.'),
-    );
-  }
-
   Widget _providerFields() {
     switch (_provider) {
       case SyncDatabaseProvider.local:
@@ -13785,7 +13848,7 @@ class _SyncAdvancedDatabasePopupState extends State<SyncAdvancedDatabasePopup> {
           ],
         );
       case SyncDatabaseProvider.turso:
-        return _hiddenTursoNotice();
+        return _workerBackedProviderFields(_provider);
       case SyncDatabaseProvider.cloudflareD1:
       case SyncDatabaseProvider.supabase:
       case SyncDatabaseProvider.neonPostgres:
