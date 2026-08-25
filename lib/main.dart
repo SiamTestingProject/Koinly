@@ -1934,6 +1934,9 @@ class AppController extends ChangeNotifier {
 
   bool get cloudSyncApprovalRequired => cloudSyncErrorCode == 'SYNC_APPROVAL_REQUIRED';
 
+  String get personalTursoWorkerUrl =>
+      syncDatabaseProvider == SyncDatabaseProvider.turso && cloudSyncApiBaseUrl != CloudSyncService.configuredApiBaseUrl ? cloudSyncApiBaseUrl : '';
+
   bool get hasAvailableUpdate => updateCheckOutcome == UpdateCheckOutcome.updateAvailable && latestGithubRelease != null;
   bool get hasPendingAndroidUpdate => pendingAndroidUpdatePath.isNotEmpty && pendingAndroidUpdateVersion.isNotEmpty && !_isPendingAndroidUpdateAlreadyInstalled();
 
@@ -12971,7 +12974,7 @@ class _CloudSyncScreenState extends State<CloudSyncScreen> {
   void initState() {
     super.initState();
     final state = context.read<AppController>();
-    _apiBaseUrlController = TextEditingController(text: state.cloudSyncApiBaseUrl);
+    _apiBaseUrlController = TextEditingController(text: state.personalTursoWorkerUrl);
     _syncIdController = TextEditingController(text: state.cloudSyncId);
     _pinController = TextEditingController(text: state.cloudSyncPin);
   }
@@ -13283,7 +13286,9 @@ class _SyncDatabaseProviderConfigScreenState extends State<SyncDatabaseProviderC
   void initState() {
     super.initState();
     final state = context.read<AppController>();
-    _apiBaseUrlController = TextEditingController(text: state.cloudSyncApiBaseUrl);
+    _apiBaseUrlController = TextEditingController(
+      text: _provider == SyncDatabaseProvider.turso ? state.personalTursoWorkerUrl : state.cloudSyncApiBaseUrl,
+    );
     _mongoUrlController = TextEditingController(text: state.syncMongoDbUrl);
     _mongoDatabaseController = TextEditingController(text: state.syncMongoDatabaseName);
     _mongoCollectionController = TextEditingController(text: state.syncMongoCollectionName);
@@ -13650,7 +13655,9 @@ class _SyncAdvancedDatabasePopupState extends State<SyncAdvancedDatabasePopup> {
     super.initState();
     final state = context.read<AppController>();
     _provider = state.syncDatabaseProvider;
-    _apiBaseUrlController = TextEditingController(text: state.cloudSyncApiBaseUrl);
+    _apiBaseUrlController = TextEditingController(
+      text: _provider == SyncDatabaseProvider.turso ? state.personalTursoWorkerUrl : state.cloudSyncApiBaseUrl,
+    );
     _mongoUrlController = TextEditingController(text: state.syncMongoDbUrl);
     _mongoDatabaseController = TextEditingController(text: state.syncMongoDatabaseName);
     _mongoCollectionController = TextEditingController(text: state.syncMongoCollectionName);
