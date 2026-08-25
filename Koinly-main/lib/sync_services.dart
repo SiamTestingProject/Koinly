@@ -29,9 +29,9 @@ class CloudSyncService {
   }
 
   static String resolveApiBaseUrl([String? savedValue]) {
-    final saved = normalizeApiBaseUrl(savedValue ?? '');
-    if (saved.isNotEmpty) return saved;
-    return normalizeApiBaseUrl(defaultApiBaseUrl);
+    final fromBuild = normalizeApiBaseUrl(defaultApiBaseUrl);
+    if (fromBuild.isNotEmpty) return fromBuild;
+    return normalizeApiBaseUrl(savedValue ?? '');
   }
 
   static Future<void> upload({

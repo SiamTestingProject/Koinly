@@ -18,10 +18,9 @@ cloud/worker/dist/
 cloud/worker/build/
 cloud/worker/.env
 cloud/worker/.dev.vars
-backend/cloudflare-turso/node_modules/
-backend/cloudflare-turso/.wrangler/
 
 outputs/
 package_phase*/
 *.zip
 *.log
+
