@@ -11218,7 +11218,7 @@ class _LoansScreenState extends State<LoansScreen> {
               },
             ),
             const SizedBox(height: 10),
-            SleekPillSelector<bool>(
+            SleekCyclePillSelector<bool>(
               options: const [
                 SleekPillOption(value: false, label: 'Open', icon: Icons.pending_actions_rounded),
                 SleekPillOption(value: true, label: 'Completed', icon: Icons.check_circle_rounded),

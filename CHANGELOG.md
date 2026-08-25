@@ -18,7 +18,6 @@
 ### Changed
 
 - The Create account form now requires a Registration Key and always relies on backend validation; Telegram tokens, chat IDs, and administrator credentials remain deployment secrets.
-- Open and Completed loan records now use separate side-by-side filter buttons instead of a single cycling control.
 - Loan screens now use friendlier wording, direct empty-state actions, clearer repayment progress, visible repayment action buttons, and a delete confirmation.
 - Added a Pursenal-style Load backup workflow in Settings that opens a file picker, loads a `.koinlybackup` file, replaces local data, and triggers the existing cloud-upload path when signed in.
 - Android package/application ID changed from `com.siamapps.koinly` to `com.koinly.siam`.
