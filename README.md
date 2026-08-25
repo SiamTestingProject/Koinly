@@ -10,9 +10,9 @@ Koinly is a local-first personal finance app built with Flutter for Android and 
 - [How Koinly stores and syncs data](#how-koinly-stores-and-syncs-data)
 - [Project structure](#project-structure)
 - [Run the app locally](#run-the-app-locally)
+- [Fork and deploy your own no-login sync Worker](#fork-and-deploy-your-own-no-login-sync-worker)
 - [Shared account sync: complete Turso and Cloudflare setup](#shared-account-sync-complete-turso-and-cloudflare-setup)
 - [Manual Worker deployment](#manual-worker-deployment)
-- [Personal no-login Turso sync](#personal-no-login-turso-sync)
 - [GitHub Actions builds and releases](#github-actions-builds-and-releases)
 - [In-app updates](#in-app-updates)
 - [Validation and packaging](#validation-and-packaging)
@@ -94,6 +94,7 @@ cloud/worker/                     Shared account Cloudflare Worker
   wrangler.toml                   Worker name and non-secret variables
 backend/cloudflare-turso/         Optional personal no-login Worker
 .github/workflows/
+  deploy-personal-sync-worker.yml Personal no-login Worker deployment
   deploy-sync-worker.yml          Shared Worker deployment
   build-android-apks.yml          Android/Windows builds and stable releases
 tool/
@@ -167,6 +168,160 @@ Useful build-time values:
 | `KOINLY_APP_VERSION` | Version shown inside the app | `1.0.70` |
 | `KOINLY_ENABLE_LOANS` | Enables the loan feature | `true` |
 | `KOINLY_INCLUDE_PRERELEASE_UPDATES` | Allows prerelease update checks for development | `false` |
+
+## Fork and deploy your own no-login sync Worker
+
+Use this option when you want online sync through your own Turso database and Cloudflare account without creating a Koinly cloud account. It uses `backend/cloudflare-turso/`, not the shared account server in `cloud/worker/`.
+
+```text
+Your fork → GitHub Action → your Cloudflare Worker → your Turso database
+                                          ↑
+                               Worker URL + Sync ID/PIN
+                                          ↑
+                                      Koinly app
+```
+
+This personal backend does not use Koinly registration keys, Telegram, JWT sessions, or the app's **Create account** button. The Turso credentials stay in GitHub and Cloudflare; the app receives only the public Worker URL and the private Sync ID/PIN you choose.
+
+### Recommended: deploy from your fork with GitHub Actions
+
+#### 1. Fork the repository
+
+Select **Fork** on GitHub, create the fork under your account, and keep the default branch named `main` or `master`. The deployment is a manual Action, so no source-code editing is required.
+
+#### 2. Create a personal Turso database
+
+Install and authenticate the Turso CLI, then run:
+
+```bash
+turso auth login
+turso db create koinly-personal-sync
+turso db show koinly-personal-sync --url
+turso db tokens create koinly-personal-sync
+```
+
+Save the `libsql://...` URL as `TURSO_DATABASE_URL` and the generated write token as `TURSO_AUTH_TOKEN`. Do not use a read-only token because the Worker stores snapshots. The `sync_snapshots` table is created automatically on first upload; there is no schema command to run.
+
+#### 3. Create Cloudflare deployment credentials
+
+In Cloudflare, create an API token from the **Edit Cloudflare Workers** template and restrict it to your account. Copy your account ID from **Workers & Pages → Account Details**.
+
+Save these values:
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+Cloudflare documents the same two CI credentials in its [GitHub Actions deployment guide](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/).
+
+#### 4. Create the personal sync secret
+
+Generate a long random value, preferably at least 32 characters, and save it as `SYNC_SECRET`. It is used to derive the stored PIN verifier and must never be embedded in the Flutter app.
+
+#### 5. Add five GitHub Actions secrets
+
+In your fork, open **Settings → Secrets and variables → Actions → New repository secret** and create:
+
+| Secret | Value |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | Token from the Edit Cloudflare Workers template |
+| `CLOUDFLARE_ACCOUNT_ID` | Account that will own the Worker |
+| `TURSO_DATABASE_URL` | `libsql://...` URL from Turso |
+| `TURSO_AUTH_TOKEN` | Turso database write token |
+| `SYNC_SECRET` | Your long random personal sync secret |
+
+Use repository **secrets**, not plain variables. Paste only each value—do not add quotes or `NAME=` before it.
+
+#### 6. Run the deployment Action
+
+Open:
+
+```text
+Actions → Deploy Personal No-Login Sync Worker → Run workflow
+```
+
+The included `.github/workflows/deploy-personal-sync-worker.yml` action:
+
+1. Installs the personal Worker's locked npm dependencies.
+2. Runs its Worker tests.
+3. Checks all five GitHub secrets.
+4. Uploads `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and `SYNC_SECRET` as encrypted Cloudflare Worker runtime secrets.
+5. Deploys the Worker named `koinly-sync`.
+
+The last deployment log prints a URL shaped like:
+
+```text
+https://koinly-sync.YOUR_CLOUDFLARE_SUBDOMAIN.workers.dev
+```
+
+The action also redeploys automatically after a push to `main` or `master` changes `backend/cloudflare-turso/**` or its workflow file. Other app or README changes do not redeploy this Worker.
+
+#### 7. Verify the Worker
+
+Open the Worker URL in a browser. A successful configured deployment returns HTTP 200 and:
+
+```json
+{
+  "ok": true,
+  "service": "koinly-personal-turso-sync",
+  "loginRequired": false
+}
+```
+
+If it returns HTTP 503 with `"ok": false`, one or more Cloudflare runtime secrets is missing. Recheck the GitHub secret names and rerun the Action.
+
+#### 8. Connect Koinly without an app account
+
+Open **Koinly → Settings → Account & sync → Use own Turso Worker** and enter:
+
+- Your `https://...workers.dev` URL
+- A private Sync ID of your choice
+- A private Sync PIN of your choice
+
+On the device containing the correct data, select **Upload Data** first. On another device, enter the same Worker URL, Sync ID, and PIN, then select **Sync**. A pull creates a local safety backup and replaces local finance data with the cloud snapshot.
+
+The personal Worker URL is entered at runtime, so you do not need to rebuild Koinly or set `KOINLY_SYNC_API_BASE_URL`. Never enter `TURSO_AUTH_TOKEN` or `SYNC_SECRET` in the app.
+
+This backend uses last-upload-wins behavior. Sync before editing on another device, and keep the Sync ID/PIN private because anyone with all three connection values can access that snapshot.
+
+### Alternative: Cloudflare's Import a repository screen
+
+You can connect the fork directly through **Cloudflare → Workers & Pages → Create application → Import a repository**. GitHub Actions is recommended because it uploads all runtime secrets during deployment; the direct Cloudflare route requires one extra dashboard step.
+
+For the screen shown above, use:
+
+| Cloudflare field | Value |
+| --- | --- |
+| Repository | Your Koinly fork |
+| Project name | `koinly-sync` |
+| Production branch | `main` or `master` |
+| Root directory | `backend/cloudflare-turso` |
+| Build command | `npm ci && npm test` |
+| Deploy command | `npx wrangler deploy` |
+| Builds for non-production branches | Off, unless you want preview builds |
+| Protect with Cloudflare Access | Off; the Worker has its own Sync ID/PIN protection |
+
+The project name must match `name = "koinly-sync"` in `backend/cloudflare-turso/wrangler.toml`. If the import screen does not show **Root directory**, finish connecting the repository, then set it under **Worker → Settings → Builds → Build configuration** before retrying the build. Cloudflare explains these fields in its [Workers Builds configuration guide](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/).
+
+If you want the first build to work from the exact screen in the screenshot before setting a root directory, use these two commands instead:
+
+```text
+Build command:  cd backend/cloudflare-turso && npm ci && npm test
+Deploy command: cd backend/cloudflare-turso && npx wrangler deploy
+```
+
+Do not use both the `cd backend/cloudflare-turso` commands and a `backend/cloudflare-turso` root directory at the same time.
+
+After the first deployment, open **Worker → Settings → Variables and Secrets → Add**, choose **Secret**, and add these runtime secrets:
+
+```text
+TURSO_DATABASE_URL
+TURSO_AUTH_TOKEN
+SYNC_SECRET
+```
+
+Select **Deploy**, then verify the Worker URL and connect it in Koinly as described above. Build variables alone are not runtime Worker secrets; use **Settings → Variables and Secrets**. See Cloudflare's [Worker secrets guide](https://developers.cloudflare.com/workers/configuration/secrets/).
 
 ## Shared account sync: complete Turso and Cloudflare setup
 
@@ -526,51 +681,6 @@ npx wrangler deploy
 
 Verify `/health`, then call the bootstrap endpoint manually if needed. For local Worker development, place the same six values in `cloud/worker/.dev.vars`; that file is ignored by Git and is loaded by `wrangler dev`. The schema installer does not read `.dev.vars`, so export the two Turso values before running `npm run schema:apply`.
 
-## Personal no-login Turso sync
-
-The optional backend in `backend/cloudflare-turso/` stores one full PIN-protected snapshot per Sync ID. It does not provide Koinly accounts, JWT sessions, invite keys, Telegram delivery, or incremental entity history.
-
-Use a separate Turso database when possible:
-
-```bash
-turso db create koinly-personal-sync
-turso db show koinly-personal-sync --url
-turso db tokens create koinly-personal-sync
-```
-
-Deploy the personal Worker:
-
-```bash
-cd backend/cloudflare-turso
-npm ci
-npx wrangler secret put TURSO_DATABASE_URL
-npx wrangler secret put TURSO_AUTH_TOKEN
-npx wrangler secret put SYNC_SECRET
-npm run deploy
-```
-
-Use a long random `SYNC_SECRET`. The Worker creates `sync_snapshots` automatically on first use.
-
-Verify the root URL returns:
-
-```json
-{
-  "ok": true,
-  "service": "koinly-personal-turso-sync",
-  "loginRequired": false
-}
-```
-
-Then open **Koinly → Settings → Account & sync → Use own Turso Worker** and enter:
-
-- The personal Worker URL
-- A private Sync ID
-- A private Sync PIN
-
-Upload from the device containing the desired source data first. A pull replaces local finance data after creating a safety backup. This backend uses last-upload-wins behavior, so sync before editing on a second device.
-
-Never enter the Turso database token or `SYNC_SECRET` into the Flutter app.
-
 ## Shared Worker API
 
 Public/service endpoints:
@@ -705,7 +815,7 @@ The packaging script excludes build outputs, caches, Worker `node_modules`, Wran
 
 ### GitHub Actions says a secret is missing
 
-Check **Settings → Secrets and variables → Actions**. Names must match exactly. `KOINLY_SYNC_API_BASE_URL` may be a repository variable or secret; the other eight shared deployment values must be repository secrets.
+Check **Settings → Secrets and variables → Actions**. Names must match exactly. The personal no-login Action needs its five listed repository secrets. The shared account Action needs eight repository secrets plus `KOINLY_SYNC_API_BASE_URL`, which may be a repository variable or secret.
 
 ### Wrangler cannot authenticate in GitHub Actions
 

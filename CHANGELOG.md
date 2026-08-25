@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added personal Turso sync: users can deploy their own Cloudflare Worker, paste its URL into the app, and sync with a Sync ID/PIN without creating a Koinly account.
+- Added personal Turso sync with a fork-ready GitHub Action: users can deploy their own Cloudflare Worker, paste its URL into the app, and sync with a Sync ID/PIN without creating a Koinly account.
 - Added server-enforced, invite-key-based account registration with one active single-use key, atomic consumption/rotation, expiration, revocation, and an auditable Turso key ledger.
 - Added automatic Telegram delivery for each newly rotated registration key, delivery retry tracking, and protected administrator status/reveal/rotate/revoke/retry endpoints.
 - Loans are enabled again with a full workflow for given/taken loans, repayment history, repayment reminders, overdue alerts, account-balance updates, and cloud sync.
