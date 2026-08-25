@@ -292,13 +292,13 @@ Hidden Settings keeps secondary controls away from the main workflow. Examples i
 
 ## Online data sync
 
-Koinly supports account-based sync and personal Turso sync. Both remain local-first.
+Koinly now uses account-based, local-first online sync.
 
 The active user flow is:
 
 1. Open Settings.
 2. Open Account & sync.
-3. Create an account, sign in, or choose **Use own Turso Worker**.
+3. Create an account or sign in.
 4. Continue using Koinly normally.
 
 Login always signs in, downloads the cloud copy as the source of truth, creates
@@ -312,9 +312,9 @@ accounts removes the untouched Cash, Card, and Bank Account placeholders, saves
 that choice locally, and cleans those placeholders again if an older install,
 seed step, or sync pass tries to bring back the exact untouched starter set.
 
-The shared account Worker URL is embedded at build time through
-`KOINLY_SYNC_API_BASE_URL`. Personal Turso users enter their own Worker URL,
-Sync ID, and Sync PIN in the app and do not need a Koinly account.
+The Cloudflare Worker URL is embedded at build time through the GitHub
+Actions/Flutter define `KOINLY_SYNC_API_BASE_URL`; it is not shown as an app
+setting.
 
 Normal app operations save to local SQLite first, update the UI immediately, and add an operation to the local `sync_outbox`. The background coordinator batches pending operations, pushes them to the Worker, pulls remote changes by server cursor, and applies them locally.
 
@@ -345,9 +345,7 @@ No Turso database token is stored in Flutter. The app talks to:
 Koinly Flutter -> Cloudflare Worker -> Turso
 ```
 
-The personal Worker is in `backend/cloudflare-turso/`. It stores one latest
-snapshot per Sync ID and requires only Turso credentials plus a Worker-side
-`SYNC_SECRET`; Turso secrets are never stored in Flutter.
+The older manual snapshot-style sync code and `backend/cloudflare-turso/` reference backend are retained as legacy reference material, but Account & sync is the normal multi-device path.
 
 ---
 
@@ -754,20 +752,17 @@ rolling back an already-created account.
 
 ---
 
-## Personal no-login sync backend
+## Legacy sync backend
 
-Deploy `backend/cloudflare-turso/`, add `TURSO_DATABASE_URL`,
-`TURSO_AUTH_TOKEN`, and `SYNC_SECRET` as Worker secrets, then paste the Worker
-URL into **Account & sync > Use own Turso Worker**. No Koinly account, invite
-key, admin approval, JWT, or Telegram configuration is required.
+The old `backend/cloudflare-turso/` snapshot/admin-approval backend is retained as reference material. It is not the normal multi-device sync path.
 
 ---
 
 ## Online sync user flow
 
 1. User opens Account & sync.
-2. User signs in to the shared account Worker, or opens **Use own Turso Worker** and enters their deployed Worker URL plus Sync ID/PIN.
-3. Personal Turso sync works without account registration; account sync can still use the current single-use registration key.
+2. The app uses the Worker URL embedded at build time through `KOINLY_SYNC_API_BASE_URL`.
+3. User creates an account with the current single-use registration key, or signs in.
 4. Create account adopts existing local data into the new account through the outbox.
 5. Login clears local finance data and replaces it with the cloud account data.
 6. Local changes are saved immediately and synced automatically in the background.

@@ -1,41 +1,78 @@
-# Personal Cloudflare + Turso Sync
+# Koinly Cloudflare + Turso Sync Backend
 
-This Worker lets one Koinly user sync through their own Turso database without creating a Koinly account. The Flutter app sends full snapshots to the Worker; Turso credentials never enter the app.
+This backend gives the Flutter app a free/low-cost online sync target:
 
-## Deploy
+- Cloudflare Worker: HTTP API + small admin panel.
+- Turso: SQLite-compatible cloud database for sync snapshots.
+- App model: local SQLite remains the source of truth; the app uploads/downloads one snapshot per Sync ID.
+- Admin approval: new Sync IDs are created as pending and must be approved before cloud sync is allowed.
 
-1. Create a Turso database and token:
+## 1. Create Turso database
 
-   ```bash
-   turso db create koinly-sync
-   turso db show koinly-sync --url
-   turso db tokens create koinly-sync
-   ```
+```bash
+turso db create koinly-sync
+turso db show koinly-sync --url
+turso db tokens create koinly-sync
+```
 
-2. Deploy `backend/cloudflare-turso` as a Cloudflare Worker:
+Save the database URL and auth token for the Cloudflare Worker secrets.
 
-   ```bash
-   npm install
-   npx wrangler secret put TURSO_DATABASE_URL
-   npx wrangler secret put TURSO_AUTH_TOKEN
-   npx wrangler secret put SYNC_SECRET
-   npm run deploy
-   ```
+The Worker now creates the `sync_snapshots` and `sync_users` tables automatically on the first API/admin request. Running `schema.sql` manually is optional.
 
-   Use a long random value for `SYNC_SECRET`. The Worker creates its table automatically on first use.
+## 2. Deploy the Cloudflare Worker from Cloudflare website
 
-3. Open the Worker URL. A configured deployment returns:
+Use these build settings:
 
-   ```json
-   {"ok":true,"service":"koinly-personal-turso-sync","loginRequired":false}
-   ```
+| Field | Value |
+|---|---|
+| Path | `backend/cloudflare-turso` |
+| Build command | `npm install` |
+| Deploy command | `npx wrangler deploy --config wrangler.toml` |
+| Non-production deploy command | `npx wrangler deploy --config wrangler.toml` |
 
-4. In Koinly, open **Settings > Account & sync > Use own Turso Worker**. Enter the Worker URL and a private Sync ID/PIN, then select **Upload Data** on the first device. Use the same values and **Sync** on another device.
+This repo includes the real `wrangler.toml`, so Cloudflare should deploy it as a Worker instead of trying to detect a static website.
 
-## Behavior
+Add these Worker secrets in Cloudflare Dashboard:
 
-- The Sync ID and PIN protect each snapshot; an existing Sync ID cannot be overwritten with a different PIN.
-- Local edits upload automatically after the first successful upload.
-- Manual **Sync** replaces local finance data with the latest cloud snapshot after a safety backup.
-- Conflict handling is last-upload-wins. Download before editing from a second device.
-- Never put `TURSO_AUTH_TOKEN` or `SYNC_SECRET` in the Flutter app.
+```text
+TURSO_DATABASE_URL
+TURSO_AUTH_TOKEN
+SYNC_SECRET
+ADMIN_KEY
+```
+
+Use a long random value for `SYNC_SECRET` and `ADMIN_KEY`.
+
+## 3. Build the Flutter app with your Worker URL
+
+The app no longer shows a **Cloudflare Worker URL** input field. Put the Worker URL into the APK at build time instead:
+
+```bash
+flutter build apk --release \
+  --no-tree-shake-icons \
+  --dart-define=KOINLY_SYNC_API_BASE_URL=https://koinly-sync.yourname.workers.dev
+```
+
+For GitHub Actions, add this repository variable or secret:
+
+```text
+KOINLY_SYNC_API_BASE_URL=https://koinly-sync.yourname.workers.dev
+```
+
+The included GitHub Actions workflow also has a manual `sync_api_base_url` input.
+
+## 4. Admin panel
+
+Open:
+
+```text
+https://koinly-sync.yourname.workers.dev/admin
+```
+
+Enter the `ADMIN_KEY` secret to login. The panel shows Sync ID, approval status, payload size, device, and update time. It deliberately does not display the finance payload. Use **Approve**, **Reject**, or **Block** to control who can sync data. Existing Sync IDs that already have snapshots are automatically migrated as approved, so old users do not need approval again.
+
+## Notes
+
+- Conflict handling is last-upload-wins. For one user with two devices, manually download before editing on a second device.
+- This starter sync stores a full JSON backup snapshot. It is simple and reliable for a personal finance app, but not a full realtime multi-user sync engine.
+- Use HTTPS only. Never expose `TURSO_AUTH_TOKEN`, `SYNC_SECRET`, or `ADMIN_KEY` in the Flutter app.
