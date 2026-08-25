@@ -19,6 +19,7 @@ enum ThemePreference { system, light, dark, batterySaver }
 enum SyncDatabaseProvider { turso, mongoDb, local, cloudflareD1, supabase, neonPostgres, firebaseFirestore }
 
 const List<SyncDatabaseProvider> userSyncDatabaseProviders = [
+  SyncDatabaseProvider.turso,
   SyncDatabaseProvider.mongoDb,
 ];
 
@@ -35,7 +36,7 @@ T enumByName<T>(Iterable<T> values, String? name, T fallback) {
 String syncDatabaseProviderLabel(SyncDatabaseProvider provider) {
   switch (provider) {
     case SyncDatabaseProvider.turso:
-      return 'Turso Database (hidden)';
+      return 'Turso Database';
     case SyncDatabaseProvider.mongoDb:
       return 'MongoDB Database';
     case SyncDatabaseProvider.local:
@@ -54,7 +55,7 @@ String syncDatabaseProviderLabel(SyncDatabaseProvider provider) {
 IconData syncDatabaseProviderIcon(SyncDatabaseProvider provider) {
   switch (provider) {
     case SyncDatabaseProvider.turso:
-      return Icons.block_rounded;
+      return Icons.cloud_rounded;
     case SyncDatabaseProvider.mongoDb:
       return Icons.storage_rounded;
     case SyncDatabaseProvider.local:
@@ -73,7 +74,7 @@ IconData syncDatabaseProviderIcon(SyncDatabaseProvider provider) {
 String syncDatabaseProviderSubtitle(SyncDatabaseProvider provider) {
   switch (provider) {
     case SyncDatabaseProvider.turso:
-      return 'Hidden for users until Turso sync is ready again.';
+      return 'Use your own Cloudflare Worker connected to Turso. No account required.';
     case SyncDatabaseProvider.mongoDb:
       return 'Use a MongoDB URL to store app sync snapshots.';
     case SyncDatabaseProvider.local:

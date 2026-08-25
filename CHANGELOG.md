@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added personal Turso sync: users can deploy their own Cloudflare Worker, paste its URL into the app, and sync with a Sync ID/PIN without creating a Koinly account.
 - Added server-enforced, invite-key-based account registration with one active single-use key, atomic consumption/rotation, expiration, revocation, and an auditable Turso key ledger.
 - Added automatic Telegram delivery for each newly rotated registration key, delivery retry tracking, and protected administrator status/reveal/rotate/revoke/retry endpoints.
 - Loans are enabled again with a full workflow for given/taken loans, repayment history, repayment reminders, overdue alerts, account-balance updates, and cloud sync.
@@ -17,7 +18,9 @@
 
 ### Changed
 
+- Simplified the personal Cloudflare/Turso Worker to three deployment secrets with no account, invite, approval, JWT, admin panel, or Telegram requirement.
 - The Create account form now requires a Registration Key and always relies on backend validation; Telegram tokens, chat IDs, and administrator credentials remain deployment secrets.
+- Open and Completed loan records now use separate side-by-side filter buttons instead of a single cycling control.
 - Loan screens now use friendlier wording, direct empty-state actions, clearer repayment progress, visible repayment action buttons, and a delete confirmation.
 - Added a Pursenal-style Load backup workflow in Settings that opens a file picker, loads a `.koinlybackup` file, replaces local data, and triggers the existing cloud-upload path when signed in.
 - Android package/application ID changed from `com.siamapps.koinly` to `com.koinly.siam`.
