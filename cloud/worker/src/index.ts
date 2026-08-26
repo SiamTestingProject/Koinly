@@ -55,7 +55,7 @@ export default {
       db = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
 
       if (request.method === 'POST' && url.pathname === '/v1/auth/register') {
-        await ensureActiveRegistrationKey(env, db, context);
+        if (registrationMode(env) === 'invite-key') await ensureActiveRegistrationKey(env, db, context);
         return await register(request, env, db, context);
       }
       if (request.method === 'POST' && url.pathname === '/v1/auth/login') return await login(request, env, db);
@@ -91,10 +91,12 @@ export default {
 };
 
 function rootResponse(env: Env): Response {
+  const mode = registrationMode(env);
   return json({
     ok: true,
     service: 'koinly-sync',
     configured: isWorkerConfigured(env),
+    registrationMode: mode,
     endpoints: {
       health: '/health',
       register: 'POST /v1/auth/register',
@@ -106,7 +108,7 @@ function rootResponse(env: Env): Response {
       replace: 'POST /v1/sync/replace',
       pull: 'GET /v1/sync/pull?cursor=0&limit=100',
       status: 'GET /v1/sync/status',
-      registrationKeyAdmin: 'Protected /v1/admin/registration-key/* endpoints',
+      ...(mode === 'invite-key' ? { registrationKeyAdmin: 'Protected /v1/admin/registration-key/* endpoints' } : {}),
     },
   });
 }
@@ -118,6 +120,7 @@ async function healthResponse(env: Env): Promise<Response> {
       ok: false,
       service: 'koinly-sync',
       configured: false,
+      registrationMode: registrationMode(env),
       databaseReachable: false,
       schemaReady: false,
       missingTables: requiredTables,
@@ -133,6 +136,7 @@ async function healthResponse(env: Env): Promise<Response> {
       ok: schemaReady,
       service: 'koinly-sync',
       configured: true,
+      registrationMode: registrationMode(env),
       databaseReachable: true,
       schemaReady,
       missingTables,
@@ -142,6 +146,7 @@ async function healthResponse(env: Env): Promise<Response> {
       ok: false,
       service: 'koinly-sync',
       configured: true,
+      registrationMode: registrationMode(env),
       databaseReachable: false,
       schemaReady: false,
       missingTables: requiredTables,
@@ -156,11 +161,14 @@ function isWorkerConfigured(env: Env): boolean {
   return Boolean(
     env.TURSO_DATABASE_URL &&
     env.TURSO_AUTH_TOKEN &&
-    env.JWT_SECRET?.length >= 32 &&
-    env.TELEGRAM_BOT_TOKEN &&
-    env.REGISTRATION_KEY_CHAT_ID &&
-    env.REGISTRATION_ADMIN_SECRET?.length >= 32,
+    env.JWT_SECRET?.length >= 32,
   );
+}
+
+export function registrationMode(env: Env): 'invite-key' | 'first-user' {
+  return env.TELEGRAM_BOT_TOKEN && env.REGISTRATION_KEY_CHAT_ID && env.REGISTRATION_ADMIN_SECRET?.length >= 32
+    ? 'invite-key'
+    : 'first-user';
 }
 
 function validateWorkerConfig(env: Env): void {
@@ -168,9 +176,6 @@ function validateWorkerConfig(env: Env): void {
     ['TURSO_DATABASE_URL', env.TURSO_DATABASE_URL],
     ['TURSO_AUTH_TOKEN', env.TURSO_AUTH_TOKEN],
     ['JWT_SECRET', env.JWT_SECRET],
-    ['TELEGRAM_BOT_TOKEN', env.TELEGRAM_BOT_TOKEN],
-    ['REGISTRATION_KEY_CHAT_ID', env.REGISTRATION_KEY_CHAT_ID],
-    ['REGISTRATION_ADMIN_SECRET', env.REGISTRATION_ADMIN_SECRET],
   ].filter(([, value]) => !value).map(([name]) => name);
 
   if (missing.length > 0) {
@@ -178,9 +183,6 @@ function validateWorkerConfig(env: Env): void {
   }
   if (env.JWT_SECRET.length < 32) {
     throw new HttpError(503, 'JWT_SECRET must contain at least 32 characters.');
-  }
-  if (env.REGISTRATION_ADMIN_SECRET.length < 32) {
-    throw new HttpError(503, 'REGISTRATION_ADMIN_SECRET must contain at least 32 characters.');
   }
 }
 
@@ -203,7 +205,8 @@ async function register(request: Request, env: Env, db: Client, context: Executi
   const body = await readJson(request);
   const email = normalizeEmail(body.email);
   const password = String(body.password ?? '');
-  const registrationKey = normalizeRegistrationKey(body.registrationKey);
+  const inviteOnly = registrationMode(env) === 'invite-key';
+  const registrationKey = inviteOnly ? normalizeRegistrationKey(body.registrationKey) : '';
   const deviceId = normalizeId(body.deviceId, 'deviceId');
   const deviceName = cleanText(body.deviceName, 80) || 'Koinly device';
   const platform = cleanText(body.platform, 40) || 'unknown';
@@ -212,35 +215,45 @@ async function register(request: Request, env: Env, db: Client, context: Executi
   const now = Date.now();
   const userId = crypto.randomUUID();
   const passwordHash = await hashPassword(password, env.JWT_SECRET);
-  const registrationKeyHash = await sha256(registrationKey);
-  const nextKey = await createRegistrationKeyRecord(env, 'SYSTEM_ROTATION', now, 'Used');
+  const registrationKeyHash = inviteOnly ? await sha256(registrationKey) : '';
+  const nextKey = inviteOnly ? await createRegistrationKeyRecord(env, 'SYSTEM_ROTATION', now, 'Used') : null;
   const transaction = await db.transaction('write');
   try {
-    const keyRow = (await transaction.execute({
-      sql: `SELECT id, status, expires_at FROM registration_keys WHERE key_hash = ? LIMIT 1`,
-      args: [registrationKeyHash],
-    })).rows[0];
-    validateRegistrationKeyRow(keyRow, now);
+    let keyRow: Record<string, unknown> | undefined;
+    if (inviteOnly) {
+      keyRow = (await transaction.execute({
+        sql: `SELECT id, status, expires_at FROM registration_keys WHERE key_hash = ? LIMIT 1`,
+        args: [registrationKeyHash],
+      })).rows[0] as Record<string, unknown> | undefined;
+      validateRegistrationKeyRow(keyRow, now);
+    } else {
+      const userCount = Number((await transaction.execute('SELECT COUNT(*) AS count FROM users')).rows[0]?.count ?? 0);
+      if (userCount > 0) {
+        throw new HttpError(403, 'Self-hosted registration is closed. Sign in with the first account.');
+      }
+    }
 
     await transaction.execute({
       sql: 'INSERT INTO users(id, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
       args: [userId, email, passwordHash, now, now],
     });
-    const consumed = await transaction.execute({
-      sql: `UPDATE registration_keys
-            SET status = 'USED', used_at = ?, used_by_user_id = ?
-            WHERE id = ? AND status = 'ACTIVE' AND used_at IS NULL AND revoked_at IS NULL
-              AND (expires_at IS NULL OR expires_at > ?)`,
-      args: [now, userId, String(keyRow!.id), now],
-    });
-    if (consumed.rowsAffected !== 1) {
-      throw new HttpError(409, 'Registration key has already been used.');
+    if (inviteOnly) {
+      const consumed = await transaction.execute({
+        sql: `UPDATE registration_keys
+              SET status = 'USED', used_at = ?, used_by_user_id = ?
+              WHERE id = ? AND status = 'ACTIVE' AND used_at IS NULL AND revoked_at IS NULL
+                AND (expires_at IS NULL OR expires_at > ?)`,
+        args: [now, userId, String(keyRow!.id), now],
+      });
+      if (consumed.rowsAffected !== 1) {
+        throw new HttpError(409, 'Registration key has already been used.');
+      }
     }
     await transaction.execute({
       sql: 'INSERT INTO devices(id, user_id, name, platform, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)',
       args: [deviceId, userId, deviceName, platform, now, now],
     });
-    await insertRegistrationKey(transaction, nextKey);
+    if (nextKey) await insertRegistrationKey(transaction, nextKey);
     await transaction.commit();
   } catch (error) {
     if (error instanceof HttpError) throw error;
@@ -252,7 +265,7 @@ async function register(request: Request, env: Env, db: Client, context: Executi
   } finally {
     transaction.close();
   }
-  scheduleRegistrationKeyDelivery(env, context, nextKey);
+  if (nextKey) scheduleRegistrationKeyDelivery(env, context, nextKey);
   return issueTokens(env, db, { userId, email, deviceId });
 }
 
@@ -298,6 +311,9 @@ async function ensureActiveRegistrationKey(env: Env, db: Client, context: Execut
 }
 
 async function registrationKeyAdmin(request: Request, url: URL, env: Env, db: Client, context: ExecutionContext): Promise<Response> {
+  if (registrationMode(env) !== 'invite-key') {
+    throw new HttpError(404, 'Registration-key administration is not enabled.');
+  }
   await requireRegistrationAdmin(request, env);
   await expireRegistrationKeys(db);
 

@@ -14,6 +14,3 @@ REGISTRATION_KEY_TTL_SECONDS = "2592000"
 # wrangler secret put TURSO_DATABASE_URL
 # wrangler secret put TURSO_AUTH_TOKEN
 # wrangler secret put JWT_SECRET
-# wrangler secret put TELEGRAM_BOT_TOKEN
-# wrangler secret put REGISTRATION_KEY_CHAT_ID
-# wrangler secret put REGISTRATION_ADMIN_SECRET

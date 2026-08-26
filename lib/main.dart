@@ -11354,7 +11354,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
       showSnack(context, 'Enter email and password.');
       return;
     }
-    if (register && _registrationKeyController.text.trim().isEmpty) {
+    if (register && !state.useCustomCloudSync && _registrationKeyController.text.trim().isEmpty) {
       showSnack(context, 'Enter your registration key.');
       return;
     }
@@ -11537,7 +11537,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                   ),
                 ),
               ),
-            if (!signedIn && _registerMode) ...[
+            if (!signedIn && _registerMode && !state.useCustomCloudSync) ...[
               const SizedBox(height: 12),
               TextField(
                 controller: _registrationKeyController,

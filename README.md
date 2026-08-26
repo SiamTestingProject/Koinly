@@ -277,19 +277,19 @@ Add all of the following:
 | `CLOUDFLARE_ACCOUNT_ID` | Selects the Cloudflare account |
 | `TURSO_DATABASE_URL` | Connects the Worker to Turso |
 | `TURSO_AUTH_TOKEN` | Authorizes Turso reads and writes |
-| `JWT_SECRET` | Signs sessions and protects password/key material |
-| `TELEGRAM_BOT_TOKEN` | Delivers single-use registration keys |
-| `REGISTRATION_KEY_CHAT_ID` | Telegram destination for registration keys |
-| `REGISTRATION_ADMIN_SECRET` | Authorizes registration-key administration |
+| `JWT_SECRET` | Signs sessions and protects password material |
 
-`JWT_SECRET` and `REGISTRATION_ADMIN_SECRET` must each contain at least 32
-characters and must be different. Generate independent random values with a
-password manager or, where OpenSSL is available:
+`JWT_SECRET` must contain at least 32 characters. Generate a random value with
+a password manager or, where OpenSSL is available:
 
 ```bash
 openssl rand -hex 32
-openssl rand -hex 32
 ```
+
+Self-hosted deployment does **not** use `REGISTRATION_ADMIN_SECRET`,
+`REGISTRATION_KEY_CHAT_ID`, or `TELEGRAM_BOT_TOKEN`. Those values belong to
+the managed default service's invite-key system and should not be added to a
+user deployment.
 
 `CLOUDFLARE_NAME` is not sensitive. The workflow accepts it from a repository
 variable as well, but storing it with the deployment secrets keeps setup to one
@@ -307,19 +307,17 @@ Open:
 The workflow:
 
 1. checks that required configuration exists;
-2. validates the Worker name and secret lengths;
+2. validates the Worker name and JWT secret length;
 3. installs locked Node dependencies;
-4. typechecks the Worker;
+4. tests and typechecks the Worker;
 5. applies the Turso schema;
 6. uploads runtime credentials as Cloudflare Worker secrets;
 7. deploys using `CLOUDFLARE_NAME`;
 8. derives the exact `workers.dev` URL from Cloudflare;
-9. validates `/health`; and
-10. creates and delivers an active registration key.
+9. validates `/health`.
 
 The job fails with a specific message when configuration, Cloudflare
-authentication, Turso access, schema setup, Worker health, or registration-key
-delivery fails.
+authentication, Turso access, schema setup, or Worker health fails.
 
 ### 7. Find and verify the Worker URL
 
@@ -338,6 +336,7 @@ A ready backend returns fields equivalent to:
 {
   "service": "koinly-sync",
   "configured": true,
+  "registrationMode": "first-user",
   "databaseReachable": true,
   "schemaReady": true,
   "ok": true
@@ -351,13 +350,14 @@ A ready backend returns fields equivalent to:
 3. Select **Self-hosted**.
 4. Paste the Worker URL without `/health` or another path.
 5. Press **Validate and use Worker**.
-6. Create an account with the registration key delivered to Telegram, or sign
-   in to an existing account on this self-hosted backend.
+6. On the first device, choose **Create account** and enter an email and
+   password. No registration key is required.
+7. On every additional device, choose **Login** and use that same account.
 
-The Worker uses invite-only account registration. Registration keys are
-single-use, expire, and are delivered to the configured Telegram destination.
-Protected administration endpoints are documented in
-`cloud/worker/README.md`.
+For safety, a self-hosted Worker accepts only its first account registration.
+After the owner account exists, registration closes and other devices must
+sign in. This prevents an unknown person from creating an account on a public
+`workers.dev` endpoint.
 
 ## Updating or redeploying the Worker
 
@@ -378,9 +378,8 @@ It can also be run manually at any time.
 - If the Turso database changes, users must use accounts that exist in the new
   database.
 
-Changing `JWT_SECRET` invalidates active sessions and prevents decryption of
-registration keys encrypted with the previous value. Rotate it only when that
-impact is intended.
+Changing `JWT_SECRET` invalidates active sessions. Rotate it only when that
+impact is intended, then sign in again on each device.
 
 ## Local Worker development
 
@@ -479,17 +478,14 @@ the name with a dash.
 - Replace `TURSO_AUTH_TOKEN` in GitHub.
 - Rerun the workflow so the schema step executes again.
 
-### Registration key delivery fails
+### Account creation says registration is closed
 
-- Verify `TELEGRAM_BOT_TOKEN`.
-- Verify `REGISTRATION_KEY_CHAT_ID`.
-- Add the bot to the target group or channel when required.
-- Rerun the deployment workflow; it retries a failed delivery once.
-- Use the protected retry or reveal endpoint described in
-  `cloud/worker/README.md` if Telegram remains unavailable.
+The self-hosted backend already has its owner account. Choose **Login** and use
+that account on the new device. To create a different owner, deploy against a
+new empty Turso database; do not delete an existing database unless its sync
+data is no longer needed.
 
-Never paste registration keys, bot tokens, database tokens, JWT secrets, or
-administrator secrets into public logs or issues.
+Never paste database tokens or JWT secrets into public logs or issues.
 
 ### Login fails after switching services
 
@@ -546,7 +542,7 @@ account sync and self-hosted deployments use `cloud/worker/`.
 - App access and refresh tokens are stored with platform secure storage.
 - Sync credentials are excluded from app backups.
 - Worker health responses do not expose secret values.
-- Use unique high-entropy values for signing and administration secrets.
+- Use a unique high-entropy value for `JWT_SECRET`.
 - Scope Cloudflare and Turso credentials to the minimum practical access.
 - Rotate exposed credentials immediately and redeploy.
 

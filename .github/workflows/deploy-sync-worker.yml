@@ -31,10 +31,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Test
+        run: npm test
+
       - name: Check deployment secrets
         run: |
           missing=0
-          for secret_name in CLOUDFLARE_NAME CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TURSO_DATABASE_URL TURSO_AUTH_TOKEN JWT_SECRET TELEGRAM_BOT_TOKEN REGISTRATION_KEY_CHAT_ID REGISTRATION_ADMIN_SECRET; do
+          for secret_name in CLOUDFLARE_NAME CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TURSO_DATABASE_URL TURSO_AUTH_TOKEN JWT_SECRET; do
             if [ -z "${!secret_name}" ]; then
               echo "Missing GitHub secret: ${secret_name}"
               missing=1
@@ -48,8 +51,8 @@ jobs:
             echo "CLOUDFLARE_NAME must be 1-63 lowercase letters, numbers, or dashes, and cannot start or end with a dash."
             exit 1
           fi
-          if [ "${#JWT_SECRET}" -lt 32 ] || [ "${#REGISTRATION_ADMIN_SECRET}" -lt 32 ]; then
-            echo "JWT_SECRET and REGISTRATION_ADMIN_SECRET must each contain at least 32 characters."
+          if [ "${#JWT_SECRET}" -lt 32 ]; then
+            echo "JWT_SECRET must contain at least 32 characters."
             exit 1
           fi
           echo "All deployment secrets are present."
@@ -62,9 +65,6 @@ jobs:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          REGISTRATION_KEY_CHAT_ID: ${{ secrets.REGISTRATION_KEY_CHAT_ID }}
-          REGISTRATION_ADMIN_SECRET: ${{ secrets.REGISTRATION_ADMIN_SECRET }}
 
       - name: Apply Turso schema
         run: npm run schema:apply
@@ -80,9 +80,6 @@ jobs:
             printf 'TURSO_DATABASE_URL=%s\n' "$TURSO_DATABASE_URL"
             printf 'TURSO_AUTH_TOKEN=%s\n' "$TURSO_AUTH_TOKEN"
             printf 'JWT_SECRET=%s\n' "$JWT_SECRET"
-            printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_BOT_TOKEN"
-            printf 'REGISTRATION_KEY_CHAT_ID=%s\n' "$REGISTRATION_KEY_CHAT_ID"
-            printf 'REGISTRATION_ADMIN_SECRET=%s\n' "$REGISTRATION_ADMIN_SECRET"
           } > .worker-secrets
           npx wrangler deploy --name "$CLOUDFLARE_NAME" --secrets-file .worker-secrets
         env:
@@ -92,9 +89,6 @@ jobs:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          REGISTRATION_KEY_CHAT_ID: ${{ secrets.REGISTRATION_KEY_CHAT_ID }}
-          REGISTRATION_ADMIN_SECRET: ${{ secrets.REGISTRATION_ADMIN_SECRET }}
 
       - name: Resolve and check Worker URL
         run: |
@@ -119,47 +113,3 @@ jobs:
           CLOUDFLARE_NAME: ${{ secrets.CLOUDFLARE_NAME || vars.CLOUDFLARE_NAME }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-      - name: Ensure an active registration key exists
-        run: |
-          curl --fail --silent --show-error \
-            --retry 5 --retry-delay 2 --retry-all-errors \
-            -X POST "$WORKER_URL/v1/admin/registration-key/bootstrap" \
-            -H "Authorization: Bearer $REGISTRATION_ADMIN_SECRET" \
-            -H "Accept: application/json"
-        env:
-          REGISTRATION_ADMIN_SECRET: ${{ secrets.REGISTRATION_ADMIN_SECRET }}
-
-      - name: Check registration key delivery
-        run: |
-          retried=0
-          for attempt in {1..10}; do
-            status="$(curl --fail --silent --show-error \
-              "$WORKER_URL/v1/admin/registration-key/status" \
-              -H "Authorization: Bearer $REGISTRATION_ADMIN_SECRET" \
-              -H "Accept: application/json")"
-            delivery="$(jq -r '.key.deliveryStatus // "MISSING"' <<<"$status")"
-            if [ "$delivery" = "DELIVERED" ]; then
-              echo "Registration key delivered successfully."
-              exit 0
-            fi
-            if [ "$delivery" = "FAILED" ]; then
-              if [ "$retried" -eq 0 ]; then
-                echo "Retrying registration key delivery once."
-                curl --fail --silent --show-error \
-                  -X POST "$WORKER_URL/v1/admin/registration-key/retry-delivery" \
-                  -H "Authorization: Bearer $REGISTRATION_ADMIN_SECRET" \
-                  -H "Accept: application/json" >/dev/null
-                retried=1
-                continue
-              fi
-              delivery_error="$(jq -r '.key.deliveryError // "unknown error"' <<<"$status")"
-              echo "Registration key delivery failed: $delivery_error"
-              exit 1
-            fi
-            sleep 3
-          done
-          echo "Registration key delivery did not finish within 30 seconds. Check TELEGRAM_BOT_TOKEN and REGISTRATION_KEY_CHAT_ID."
-          exit 1
-        env:
-          REGISTRATION_ADMIN_SECRET: ${{ secrets.REGISTRATION_ADMIN_SECRET }}

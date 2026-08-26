@@ -1,9 +1,78 @@
 # Koinly Sync Worker
 
-Cloudflare Worker backend for Koinly multi-device sync.
+Cloudflare Worker backend for Koinly multi-device sync. The app talks to the
+Worker, while Turso credentials remain in encrypted Worker secrets and never
+ship inside the app.
 
-The Flutter app talks only to this Worker. Turso credentials stay in Worker
-secrets and are never shipped in the app.
+## Required configuration
+
+GitHub Actions deployment requires these repository secrets:
+
+```text
+CLOUDFLARE_NAME
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+TURSO_DATABASE_URL
+TURSO_AUTH_TOKEN
+JWT_SECRET
+```
+
+`JWT_SECRET` must contain at least 32 characters. Self-hosted deployments do
+not require `REGISTRATION_ADMIN_SECRET`, `REGISTRATION_KEY_CHAT_ID`, or
+`TELEGRAM_BOT_TOKEN`; those are reserved for the managed default service.
+
+The workflow applies `schema.sql`, uploads the Turso and JWT values as
+Cloudflare Worker secrets, deploys using `CLOUDFLARE_NAME`, and verifies the
+deployed `/health` endpoint.
+
+## Registration
+
+A new self-hosted backend accepts one owner account without a registration
+key. Registration closes after that account is created. Additional devices
+must log in with the same owner account. This keeps a public `workers.dev`
+endpoint from allowing unlimited account creation without adding a separate
+invite system.
+
+## Local deployment
+
+Install dependencies, apply the schema, and add runtime secrets:
+
+```bash
+npm ci
+npm run typecheck
+npm test
+npm run schema:apply
+wrangler secret put TURSO_DATABASE_URL
+wrangler secret put TURSO_AUTH_TOKEN
+wrangler secret put JWT_SECRET
+npx wrangler deploy --name my-koinly-sync
+```
+
+`schema.sql` is idempotent, so applying it again does not erase existing sync
+data.
+
+The Cloudflare API token used by automation should be scoped to the target
+account and created from the **Edit Cloudflare Workers** template. A standard
+`workers.dev` deployment needs Workers Scripts edit access plus account and
+membership read access. Custom routes or domains may need Workers Routes edit
+access too.
+
+## Health check
+
+Open `https://<worker-name>.<account-subdomain>.workers.dev/health`. A ready
+self-hosted backend returns values equivalent to:
+
+```json
+{
+  "ok": true,
+  "service": "koinly-sync",
+  "configured": true,
+  "registrationMode": "first-user",
+  "databaseReachable": true,
+  "schemaReady": true,
+  "missingTables": []
+}
+```
 
 ## API
 
@@ -19,102 +88,13 @@ secrets and are never shipped in the app.
 - `GET /v1/sync/pull?cursor=0&limit=100`
 - `GET /v1/sync/status`
 
-## Setup
+## Sync model
 
-1. Create a Turso database.
-2. Apply `schema.sql`.
-3. Choose `CLOUDFLARE_NAME`; GitHub Actions passes it to Wrangler as the Worker name.
-4. Add deployment secrets in GitHub repo Settings > Secrets and variables >
-   Actions:
+Clients write local SQLite first and queue entity operations. The Worker
+deduplicates operations by ID, stores each user's current entity state, and
+appends ordered changes for other devices to pull. Backup restore uses
+`POST /v1/sync/replace` to replace only the authenticated user's cloud state.
 
-```text
-CLOUDFLARE_NAME
-CLOUDFLARE_API_TOKEN
-CLOUDFLARE_ACCOUNT_ID
-TURSO_DATABASE_URL
-TURSO_AUTH_TOKEN
-JWT_SECRET
-TELEGRAM_BOT_TOKEN
-REGISTRATION_KEY_CHAT_ID
-REGISTRATION_ADMIN_SECRET
-```
-
-The workflow uploads the database, authentication, and registration values to
-Cloudflare as Worker secrets during deploy, so you do not need to add them
-twice when deploying through GitHub Actions.
-
-If you deploy from your local terminal instead of GitHub Actions, add Worker
-runtime secrets manually:
-
-```bash
-wrangler secret put TURSO_DATABASE_URL
-wrangler secret put TURSO_AUTH_TOKEN
-wrangler secret put JWT_SECRET
-wrangler secret put TELEGRAM_BOT_TOKEN
-wrangler secret put REGISTRATION_KEY_CHAT_ID
-wrangler secret put REGISTRATION_ADMIN_SECRET
-```
-
-The Cloudflare API token must be scoped to the target Cloudflare account and have the Cloudflare
-`Edit Cloudflare Workers` token template permissions. If you create it
-manually, include at minimum:
-
-```text
-Account  > Workers Scripts   > Edit/Write
-Account  > Account Settings  > Read
-User     > User Details      > Read
-User     > Memberships       > Read
-```
-
-If you attach the Worker to routes or a custom domain, also include:
-
-```text
-Zone     > Workers Routes    > Edit/Write
-```
-
-After changing the token in Cloudflare, replace the existing GitHub
-`CLOUDFLARE_API_TOKEN` secret with the new token value.
-
-5. Deploy:
-
-```bash
-npm ci
-npm run schema:apply
-npx wrangler deploy --name my-koinly-sync
-```
-
-The GitHub Actions workflow also runs `npm run schema:apply` before deploying.
-The schema file is idempotent, so it is safe to run on every deploy and will not
-erase existing sync data.
-
-6. Open the deployed Worker URL in a browser. `/` should return a JSON service
-summary. `/health` should return `ok: true`, `databaseReachable: true`, and
-`schemaReady: true` after `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and
-`JWT_SECRET` are configured.
-
-The Worker also runs the idempotent schema bootstrap before auth/sync requests,
-so missing tables are created automatically if the GitHub Actions schema step
-was skipped.
-
-If Cloudflare shows error `1101`, check Worker logs. Most setup-time crashes
-are caused by missing Worker secrets, invalid Turso credentials, or not applying
-`schema.sql` to the Turso database.
-
-## Sync Model
-
-Clients write local SQLite first, enqueue entity operations in `sync_outbox`,
-then push batches. The server deduplicates by `operationId`, stores current
-entity state, and appends `sync_changes`. Clients pull by monotonic sequence.
-
-`POST /v1/sync/replace` is reserved for backup restore. It clears the user's
-server-side current entity state, appends a `__reset__` change marker, then
-adds the restored entity rows. Updated clients clear local finance data when
-they receive the reset marker before applying the restored cloud copy.
-
-Financial correctness is protected by:
-
-- idempotent operations;
-- tenant-scoped server queries;
-- explicit stale-version conflicts;
-- bounded batches;
-- local transactional apply on the Flutter side.
+The backend uses tenant-scoped queries, password hashing, signed short-lived
+access tokens, rotating refresh tokens, bounded batches, idempotent operation
+IDs, stale-version conflict checks, and transactional database writes.
