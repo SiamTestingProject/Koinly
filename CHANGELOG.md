@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.0.73] - 2026-08-26
+
+### Fixed
+
+- Worker deployment now health-checks the exact public target reported by
+  Wrangler instead of reconstructing the `workers.dev` URL.
+- Deployment rejects non-Turso database URLs and reports Cloudflare error pages
+  without producing a misleading `jq` parse error.
+
+## [1.0.72] - 2026-08-26
+
+### Added
+
+- Added optional self-hosted cloud sync using a user-owned Cloudflare Worker
+  and Turso database, with runtime endpoint selection and health validation.
+
+### Changed
+
+- Self-hosted deployment now requires only Cloudflare, Turso, and JWT
+  configuration; Telegram and registration-administrator secrets are not
+  required.
+- Fork builds can use temporary Android signing when permanent signing secrets
+  are absent, and the default sync endpoint is optional.
+- Rewrote the project README with complete setup, deployment, security, build,
+  and troubleshooting documentation.
+
+### Fixed
+
+- Self-hosted account creation no longer asks for a managed-service
+  registration key and safely closes registration after the first owner.
+- Release builds and tags now use the version declared in `pubspec.yaml`.
+
 ## Unreleased
 
 ### Added

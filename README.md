@@ -196,7 +196,7 @@ unavailable.
 
 ```bash
 flutter build apk --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.71 \
+  --dart-define=KOINLY_APP_VERSION=1.0.73 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -208,7 +208,7 @@ or test builds; see [Android signing](#android-signing).
 
 ```bash
 flutter build windows --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.71 \
+  --dart-define=KOINLY_APP_VERSION=1.0.73 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -643,6 +643,18 @@ the name with a dash.
 - Create a new full-access Turso token.
 - Replace the GitHub secret and rerun the deployment workflow.
 - Inspect the **Apply Turso schema** step before checking Worker logs.
+
+### The health check returns Cloudflare error 1042
+
+Cloudflare uses error `1042` to block a Worker request loop.
+
+- Confirm `TURSO_DATABASE_URL` is the standard `libsql://*.turso.io` value
+  copied from `turso db show <database> --url`.
+- Never set `TURSO_DATABASE_URL` to the deployed Worker URL.
+- Remove any same-account Worker proxy route that sends the Worker back to its
+  own `workers.dev` endpoint.
+- Rerun **Deploy Sync Worker**. The workflow uses the exact target URL reported
+  by Wrangler and prints the HTTP response when health is not JSON.
 
 ### Account creation says registration is closed
 

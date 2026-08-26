@@ -55,6 +55,10 @@ jobs:
             echo "JWT_SECRET must contain at least 32 characters."
             exit 1
           fi
+          if ! [[ "$TURSO_DATABASE_URL" =~ ^libsql://[^/?[:space:]]+\.turso\.io/?$ ]]; then
+            echo "::error::TURSO_DATABASE_URL must be the libsql:// URL returned by 'turso db show <database> --url'. Do not use a workers.dev URL."
+            exit 1
+          fi
           echo "All deployment secrets are present."
           echo "If deploy later fails with authentication code 10000, recreate CLOUDFLARE_API_TOKEN using Cloudflare's Edit Cloudflare Workers token template."
           echo "Required permissions: Account Workers Scripts Edit/Write, Account Settings Read, User Details Read, User Memberships Read."
@@ -74,14 +78,28 @@ jobs:
 
       - name: Deploy Worker
         run: |
-          trap 'rm -f .worker-secrets' EXIT
+          deploy_output="$RUNNER_TEMP/wrangler-output.jsonl"
+          trap 'rm -f .worker-secrets "$deploy_output"' EXIT
           umask 077
           {
             printf 'TURSO_DATABASE_URL=%s\n' "$TURSO_DATABASE_URL"
             printf 'TURSO_AUTH_TOKEN=%s\n' "$TURSO_AUTH_TOKEN"
             printf 'JWT_SECRET=%s\n' "$JWT_SECRET"
           } > .worker-secrets
+          export WRANGLER_OUTPUT_FILE_PATH="$deploy_output"
           npx wrangler deploy --name "$CLOUDFLARE_NAME" --secrets-file .worker-secrets
+
+          if [ ! -s "$deploy_output" ]; then
+            echo "::error::Wrangler deployed the Worker but did not create its structured deployment report."
+            exit 1
+          fi
+          worker_url="$(jq -sr '[.[] | select(.type == "deploy") | .targets[]? | select(type == "string" and startswith("https://"))] | last // empty' "$deploy_output")"
+          if [ -z "$worker_url" ]; then
+            echo "::error::Wrangler deployed the Worker but did not report a public target URL. Confirm workers_dev = true and enable the account's workers.dev subdomain."
+            exit 1
+          fi
+          echo "WORKER_URL=$worker_url" >> "$GITHUB_ENV"
+          echo "Deployed Worker URL: $worker_url"
         env:
           CLOUDFLARE_NAME: ${{ secrets.CLOUDFLARE_NAME || vars.CLOUDFLARE_NAME }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -90,26 +108,30 @@ jobs:
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
 
-      - name: Resolve and check Worker URL
+      - name: Check Worker health
         run: |
-          response="$(curl --fail --silent --show-error \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")"
-          subdomain="$(jq -er '.result.subdomain // empty' <<<"$response")" || {
-            echo "Could not read the workers.dev account subdomain from Cloudflare."
-            exit 1
-          }
-          worker_url="https://${CLOUDFLARE_NAME}.${subdomain}.workers.dev"
-          health="$(curl --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors "$worker_url/health")"
-          if ! jq -e '.service == "koinly-sync" and .ok == true and .databaseReachable == true and .schemaReady == true' >/dev/null <<<"$health"; then
-            echo "The deployed Worker health check failed: $health"
+          health_file="$RUNNER_TEMP/koinly-worker-health"
+          http_status="$(curl --silent --show-error --location \
+            --retry 5 --retry-delay 2 --retry-all-errors \
+            --output "$health_file" --write-out '%{http_code}' \
+            "$WORKER_URL/health")"
+
+          if ! jq -e 'type == "object"' "$health_file" >/dev/null 2>&1; then
+            echo "::error::The deployed Worker returned a non-JSON health response (HTTP $http_status)."
+            head -c 1200 "$health_file"
+            echo
+            if grep -q 'error code: 1042' "$health_file"; then
+              echo "::error::Cloudflare 1042 blocked a Worker loop. Confirm TURSO_DATABASE_URL is a libsql://*.turso.io URL, not a workers.dev URL, and remove any same-account proxy route in front of this Worker."
+            fi
             exit 1
           fi
-          echo "WORKER_URL=$worker_url" >> "$GITHUB_ENV"
+
+          if ! jq -e '.service == "koinly-sync" and .ok == true and .databaseReachable == true and .schemaReady == true' "$health_file" >/dev/null; then
+            echo "::error::The deployed Worker is reachable but not healthy (HTTP $http_status)."
+            jq -c . "$health_file"
+            exit 1
+          fi
+
           echo "### Self-hosted Cloud Sync" >> "$GITHUB_STEP_SUMMARY"
-          echo "Worker URL: \`$worker_url\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "Deployed Worker URL: $worker_url"
-        env:
-          CLOUDFLARE_NAME: ${{ secrets.CLOUDFLARE_NAME || vars.CLOUDFLARE_NAME }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          echo "Worker URL: \`$WORKER_URL\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Worker health check passed: $WORKER_URL"

@@ -98,3 +98,12 @@ appends ordered changes for other devices to pull. Backup restore uses
 The backend uses tenant-scoped queries, password hashing, signed short-lived
 access tokens, rotating refresh tokens, bounded batches, idempotent operation
 IDs, stale-version conflict checks, and transactional database writes.
+
+## Troubleshooting
+
+If deployment health returns Cloudflare error `1042`, confirm
+`TURSO_DATABASE_URL` is the `libsql://*.turso.io` value printed by the Turso
+CLI. A Worker URL or same-account Worker proxy can create a request loop that
+Cloudflare blocks before the health endpoint can return JSON. The deployment
+workflow uses Wrangler's exact reported target and prints the HTTP response to
+make this failure clear.

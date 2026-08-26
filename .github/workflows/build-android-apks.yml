@@ -73,13 +73,17 @@ jobs:
           distributionUrl=https\://services.gradle.org/distributions/gradle-8.14.1-bin.zip
           EOF_GRADLE
 
-      - name: Stamp automatic app version
+      - name: Read app version
         run: |
-          BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))
-          VERSION_NAME="1.0.${BUILD_NUMBER}"
+          FULL_VERSION="$(awk '/^version:/ { print $2; exit }' pubspec.yaml)"
+          VERSION_NAME="${FULL_VERSION%%+*}"
+          BUILD_NUMBER="${FULL_VERSION##*+}"
+          if ! [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || ! [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::pubspec.yaml version must use semantic-version+positive-build-number, for example 1.2.3+123."
+            exit 1
+          fi
           echo "KOINLY_APP_VERSION_NAME=${VERSION_NAME}" >> "$GITHUB_ENV"
           echo "KOINLY_APP_BUILD_NUMBER=${BUILD_NUMBER}" >> "$GITHUB_ENV"
-          sed -i -E "s/^version:.*/version: ${VERSION_NAME}+${BUILD_NUMBER}/" pubspec.yaml
           sed -i -E "s/versionCode = [0-9]+/versionCode = ${BUILD_NUMBER}/" android/app/build.gradle
           sed -i -E "s/versionName = \"[^\"]+\"/versionName = \"${VERSION_NAME}\"/" android/app/build.gradle
           grep -nE "^(version:)|versionCode|versionName" pubspec.yaml android/app/build.gradle
@@ -282,17 +286,19 @@ jobs:
             throw "Windows icon was not copied: $iconDest"
           }
 
-      - name: Stamp automatic app version
+      - name: Read app version
         shell: pwsh
         run: |
-          $buildNumber = 1000 + [int]$env:GITHUB_RUN_NUMBER
-          $versionName = "1.0.$buildNumber"
+          $versionLine = Get-Content "pubspec.yaml" | Where-Object { $_ -match '^version:' } | Select-Object -First 1
+          $fullVersion = ($versionLine -replace '^version:\s*', '').Trim()
+          $parts = $fullVersion -split '\+', 2
+          if ($parts.Count -ne 2 -or $parts[0] -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$' -or $parts[1] -notmatch '^[1-9]\d*$') {
+            throw "pubspec.yaml version must use semantic-version+positive-build-number, for example 1.2.3+123."
+          }
+          $versionName = $parts[0]
+          $buildNumber = $parts[1]
           "KOINLY_APP_VERSION_NAME=$versionName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "KOINLY_APP_BUILD_NUMBER=$buildNumber" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-          $pubspec = Get-Content "pubspec.yaml" -Raw
-          $pubspec = $pubspec -replace '(?m)^version:\s*.*$', "version: $versionName+$buildNumber"
-          Set-Content -Path "pubspec.yaml" -Value $pubspec -Encoding UTF8
           Select-String -Path "pubspec.yaml" -Pattern "^version:"
 
       - name: Patch Windows CMake for CMake 4/Firebase compatibility
@@ -580,13 +586,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))
-          VERSION_NAME="1.0.${BUILD_NUMBER}"
+          FULL_VERSION="$(awk '/^version:/ { print $2; exit }' pubspec.yaml)"
+          VERSION_NAME="${FULL_VERSION%%+*}"
+          BUILD_NUMBER="${FULL_VERSION##*+}"
+          if ! [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || ! [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Invalid pubspec.yaml version: $FULL_VERSION"
+            exit 1
+          fi
           RELEASE_TAG="v${VERSION_NAME}"
           RELEASE_TITLE="Koinly Stable ${VERSION_NAME}"
 
-          # Prefer a real version section when it exists. For automatic CI
-          # versions, fall back to only the first/current bullet in each top
+          # Prefer a real version section when it exists. Otherwise, fall back
+          # to only the first/current bullet in each top
           # Unreleased category and stop before archived development history.
           awk -v version="${VERSION_NAME}" '
             BEGIN { capture=0; found=0 }
