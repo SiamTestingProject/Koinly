@@ -26,7 +26,7 @@ jobs:
           node-version: 22
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
@@ -34,7 +34,7 @@ jobs:
       - name: Check deployment secrets
         run: |
           missing=0
-          for secret_name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TURSO_DATABASE_URL TURSO_AUTH_TOKEN JWT_SECRET TELEGRAM_BOT_TOKEN REGISTRATION_KEY_CHAT_ID REGISTRATION_ADMIN_SECRET KOINLY_SYNC_API_BASE_URL; do
+          for secret_name in CLOUDFLARE_NAME CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TURSO_DATABASE_URL TURSO_AUTH_TOKEN JWT_SECRET TELEGRAM_BOT_TOKEN REGISTRATION_KEY_CHAT_ID REGISTRATION_ADMIN_SECRET; do
             if [ -z "${!secret_name}" ]; then
               echo "Missing GitHub secret: ${secret_name}"
               missing=1
@@ -44,10 +44,19 @@ jobs:
             echo "Create the missing secrets in GitHub repo Settings > Secrets and variables > Actions."
             exit 1
           fi
+          if ! [[ "$CLOUDFLARE_NAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+            echo "CLOUDFLARE_NAME must be 1-63 lowercase letters, numbers, or dashes, and cannot start or end with a dash."
+            exit 1
+          fi
+          if [ "${#JWT_SECRET}" -lt 32 ] || [ "${#REGISTRATION_ADMIN_SECRET}" -lt 32 ]; then
+            echo "JWT_SECRET and REGISTRATION_ADMIN_SECRET must each contain at least 32 characters."
+            exit 1
+          fi
           echo "All deployment secrets are present."
           echo "If deploy later fails with authentication code 10000, recreate CLOUDFLARE_API_TOKEN using Cloudflare's Edit Cloudflare Workers token template."
           echo "Required permissions: Account Workers Scripts Edit/Write, Account Settings Read, User Details Read, User Memberships Read."
         env:
+          CLOUDFLARE_NAME: ${{ secrets.CLOUDFLARE_NAME || vars.CLOUDFLARE_NAME }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
@@ -56,7 +65,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           REGISTRATION_KEY_CHAT_ID: ${{ secrets.REGISTRATION_KEY_CHAT_ID }}
           REGISTRATION_ADMIN_SECRET: ${{ secrets.REGISTRATION_ADMIN_SECRET }}
-          KOINLY_SYNC_API_BASE_URL: ${{ secrets.KOINLY_SYNC_API_BASE_URL || vars.KOINLY_SYNC_API_BASE_URL }}
 
       - name: Apply Turso schema
         run: npm run schema:apply
@@ -76,8 +84,9 @@ jobs:
             printf 'REGISTRATION_KEY_CHAT_ID=%s\n' "$REGISTRATION_KEY_CHAT_ID"
             printf 'REGISTRATION_ADMIN_SECRET=%s\n' "$REGISTRATION_ADMIN_SECRET"
           } > .worker-secrets
-          npx wrangler deploy --secrets-file .worker-secrets
+          npx wrangler deploy --name "$CLOUDFLARE_NAME" --secrets-file .worker-secrets
         env:
+          CLOUDFLARE_NAME: ${{ secrets.CLOUDFLARE_NAME || vars.CLOUDFLARE_NAME }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
@@ -87,13 +96,70 @@ jobs:
           REGISTRATION_KEY_CHAT_ID: ${{ secrets.REGISTRATION_KEY_CHAT_ID }}
           REGISTRATION_ADMIN_SECRET: ${{ secrets.REGISTRATION_ADMIN_SECRET }}
 
+      - name: Resolve and check Worker URL
+        run: |
+          response="$(curl --fail --silent --show-error \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")"
+          subdomain="$(jq -er '.result.subdomain // empty' <<<"$response")" || {
+            echo "Could not read the workers.dev account subdomain from Cloudflare."
+            exit 1
+          }
+          worker_url="https://${CLOUDFLARE_NAME}.${subdomain}.workers.dev"
+          health="$(curl --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors "$worker_url/health")"
+          if ! jq -e '.service == "koinly-sync" and .ok == true and .databaseReachable == true and .schemaReady == true' >/dev/null <<<"$health"; then
+            echo "The deployed Worker health check failed: $health"
+            exit 1
+          fi
+          echo "WORKER_URL=$worker_url" >> "$GITHUB_ENV"
+          echo "### Self-hosted Cloud Sync" >> "$GITHUB_STEP_SUMMARY"
+          echo "Worker URL: \`$worker_url\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deployed Worker URL: $worker_url"
+        env:
+          CLOUDFLARE_NAME: ${{ secrets.CLOUDFLARE_NAME || vars.CLOUDFLARE_NAME }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       - name: Ensure an active registration key exists
         run: |
           curl --fail --silent --show-error \
             --retry 5 --retry-delay 2 --retry-all-errors \
-            -X POST "$KOINLY_SYNC_API_BASE_URL/v1/admin/registration-key/bootstrap" \
+            -X POST "$WORKER_URL/v1/admin/registration-key/bootstrap" \
             -H "Authorization: Bearer $REGISTRATION_ADMIN_SECRET" \
             -H "Accept: application/json"
         env:
-          KOINLY_SYNC_API_BASE_URL: ${{ secrets.KOINLY_SYNC_API_BASE_URL || vars.KOINLY_SYNC_API_BASE_URL }}
+          REGISTRATION_ADMIN_SECRET: ${{ secrets.REGISTRATION_ADMIN_SECRET }}
+
+      - name: Check registration key delivery
+        run: |
+          retried=0
+          for attempt in {1..10}; do
+            status="$(curl --fail --silent --show-error \
+              "$WORKER_URL/v1/admin/registration-key/status" \
+              -H "Authorization: Bearer $REGISTRATION_ADMIN_SECRET" \
+              -H "Accept: application/json")"
+            delivery="$(jq -r '.key.deliveryStatus // "MISSING"' <<<"$status")"
+            if [ "$delivery" = "DELIVERED" ]; then
+              echo "Registration key delivered successfully."
+              exit 0
+            fi
+            if [ "$delivery" = "FAILED" ]; then
+              if [ "$retried" -eq 0 ]; then
+                echo "Retrying registration key delivery once."
+                curl --fail --silent --show-error \
+                  -X POST "$WORKER_URL/v1/admin/registration-key/retry-delivery" \
+                  -H "Authorization: Bearer $REGISTRATION_ADMIN_SECRET" \
+                  -H "Accept: application/json" >/dev/null
+                retried=1
+                continue
+              fi
+              delivery_error="$(jq -r '.key.deliveryError // "unknown error"' <<<"$status")"
+              echo "Registration key delivery failed: $delivery_error"
+              exit 1
+            fi
+            sleep 3
+          done
+          echo "Registration key delivery did not finish within 30 seconds. Check TELEGRAM_BOT_TOKEN and REGISTRATION_KEY_CHAT_ID."
+          exit 1
+        env:
           REGISTRATION_ADMIN_SECRET: ${{ secrets.REGISTRATION_ADMIN_SECRET }}

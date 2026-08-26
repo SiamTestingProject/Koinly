@@ -41,101 +41,6 @@ const requiredTables = [
   'registration_keys',
 ];
 
-const schemaStatements = [
-  `CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS refresh_tokens (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    token_hash TEXT NOT NULL UNIQUE,
-    device_id TEXT NOT NULL,
-    expires_at INTEGER NOT NULL,
-    revoked_at INTEGER,
-    created_at INTEGER NOT NULL,
-    rotated_at INTEGER,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS devices (
-    id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    last_seen_at INTEGER NOT NULL,
-    revoked_at INTEGER,
-    PRIMARY KEY(user_id, id),
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS sync_entities (
-    user_id TEXT NOT NULL,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    payload_json TEXT NOT NULL,
-    deleted_at INTEGER,
-    updated_at INTEGER NOT NULL,
-    last_operation_id TEXT NOT NULL,
-    PRIMARY KEY(user_id, entity_type, entity_id),
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS sync_changes (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    operation TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    payload_json TEXT,
-    device_id TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    changed_at INTEGER NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS processed_operations (
-    user_id TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    sequence INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY(user_id, operation_id),
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS rate_limits (
-    key TEXT PRIMARY KEY,
-    window_start INTEGER NOT NULL,
-    count INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS registration_keys (
-    id TEXT PRIMARY KEY,
-    key_hash TEXT NOT NULL UNIQUE,
-    encrypted_key TEXT NOT NULL,
-    encryption_iv TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER,
-    used_at INTEGER,
-    used_by_user_id TEXT,
-    status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'USED', 'REVOKED', 'EXPIRED')),
-    revoked_at INTEGER,
-    created_by TEXT NOT NULL,
-    delivery_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(delivery_status IN ('PENDING', 'DELIVERED', 'FAILED')),
-    delivery_attempts INTEGER NOT NULL DEFAULT 0,
-    last_delivery_attempt_at INTEGER,
-    delivered_at INTEGER,
-    delivery_error TEXT,
-    FOREIGN KEY(used_by_user_id) REFERENCES users(id)
-  )`,
-  'CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id, device_id)',
-  'CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id, last_seen_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_sync_changes_user_sequence ON sync_changes(user_id, sequence)',
-  'CREATE INDEX IF NOT EXISTS idx_sync_entities_user_updated ON sync_entities(user_id, updated_at DESC)',
-  "CREATE UNIQUE INDEX IF NOT EXISTS idx_registration_keys_one_active ON registration_keys(status) WHERE status = 'ACTIVE'",
-  'CREATE INDEX IF NOT EXISTS idx_registration_keys_created ON registration_keys(created_at DESC)',
-];
-
 export default {
   async fetch(request: Request, env: Env, context: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -148,7 +53,6 @@ export default {
 
       validateWorkerConfig(env);
       db = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
-      await ensureSchema(db);
 
       if (request.method === 'POST' && url.pathname === '/v1/auth/register') {
         await ensureActiveRegistrationKey(env, db, context);
@@ -223,7 +127,6 @@ async function healthResponse(env: Env): Promise<Response> {
   let db: Client | undefined;
   try {
     db = createClient({ url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN });
-    await ensureSchema(db);
     const missingTables = await missingSchemaTables(db);
     const schemaReady = missingTables.length === 0;
     return json({
@@ -253,7 +156,7 @@ function isWorkerConfigured(env: Env): boolean {
   return Boolean(
     env.TURSO_DATABASE_URL &&
     env.TURSO_AUTH_TOKEN &&
-    env.JWT_SECRET &&
+    env.JWT_SECRET?.length >= 32 &&
     env.TELEGRAM_BOT_TOKEN &&
     env.REGISTRATION_KEY_CHAT_ID &&
     env.REGISTRATION_ADMIN_SECRET?.length >= 32,
@@ -273,18 +176,11 @@ function validateWorkerConfig(env: Env): void {
   if (missing.length > 0) {
     throw new HttpError(503, `Worker is missing required secret(s): ${missing.join(', ')}.`);
   }
+  if (env.JWT_SECRET.length < 32) {
+    throw new HttpError(503, 'JWT_SECRET must contain at least 32 characters.');
+  }
   if (env.REGISTRATION_ADMIN_SECRET.length < 32) {
     throw new HttpError(503, 'REGISTRATION_ADMIN_SECRET must contain at least 32 characters.');
-  }
-}
-
-async function ensureSchema(db: Client): Promise<void> {
-  try {
-    for (const statement of schemaStatements) {
-      await db.execute(statement);
-    }
-  } catch (error) {
-    throw new HttpError(503, `Turso schema/database setup failed: ${databaseErrorMessage(error)}`);
   }
 }
 
@@ -819,66 +715,170 @@ async function pushWithOperations(db: Client, auth: AuthContext, rawOperations: 
   if (!Array.isArray(rawOperations)) throw new HttpError(400, 'operations must be an array.');
   if (rawOperations.length > maxBatch) throw new HttpError(413, `Batch limit is ${maxBatch} operations.`);
 
-  const accepted: Array<{ operationId: string; sequence: number; version: number }> = [];
-  const conflicts: Array<{ operationId: string; entityType: string; entityId: string; serverVersion: number }> = [];
-
+  const deduplicated = new Map<string, SyncOperation>();
   for (const raw of rawOperations) {
     const op = validateOperation(raw);
-    const processed = (await db.execute({
-      sql: 'SELECT sequence FROM processed_operations WHERE user_id = ? AND operation_id = ?',
-      args: [auth.userId, op.operationId],
-    })).rows[0];
-    if (processed) {
-      accepted.push({ operationId: op.operationId, sequence: Number(processed.sequence), version: op.baseVersion ?? 0 });
-      continue;
+    if (!deduplicated.has(op.operationId)) deduplicated.set(op.operationId, op);
+  }
+  const operations = [...deduplicated.values()];
+  if (operations.length === 0) return json({ ok: true, accepted: [], conflicts: [] });
+
+  const accepted: Array<{ operationId: string; sequence: number; version: number }> = [];
+  const conflicts: Array<{ operationId: string; entityType: string; entityId: string; serverVersion: number }> = [];
+  const transaction = await db.transaction('write');
+
+  try {
+    // Resolve retries in one query. Joining back to sync_changes gives the exact
+    // version assigned by the original successful write instead of echoing the
+    // client's stale baseVersion.
+    const processedPlaceholders = operations.map(() => '?').join(',');
+    const processedRows = (await transaction.execute({
+      sql: `SELECT p.operation_id, p.sequence,
+                   COALESCE((
+                     SELECT c.version FROM sync_changes c
+                     WHERE c.user_id = p.user_id AND c.operation_id = p.operation_id
+                     ORDER BY c.sequence DESC LIMIT 1
+                   ), 0) AS version
+            FROM processed_operations p
+            WHERE p.user_id = ? AND p.operation_id IN (${processedPlaceholders})`,
+      args: [auth.userId, ...operations.map(op => op.operationId)],
+    })).rows;
+    const processedById = new Map<string, { sequence: number; version: number }>(
+      processedRows.map(row => [
+        String(row.operation_id),
+        { sequence: Number(row.sequence), version: Number(row.version) },
+      ]),
+    );
+
+    const pending: SyncOperation[] = [];
+    for (const op of operations) {
+      const processed = processedById.get(op.operationId);
+      if (processed) {
+        accepted.push({ operationId: op.operationId, sequence: processed.sequence, version: processed.version });
+      } else {
+        pending.push(op);
+      }
     }
 
-    const existing = (await db.execute({
-      sql: 'SELECT version FROM sync_entities WHERE user_id = ? AND entity_type = ? AND entity_id = ?',
-      args: [auth.userId, op.entityType, op.entityId],
-    })).rows[0];
-    const serverVersion = existing ? Number(existing.version) : 0;
-    const baseVersion = op.baseVersion ?? 0;
-    if (serverVersion > baseVersion) {
-      conflicts.push({ operationId: op.operationId, entityType: op.entityType, entityId: op.entityId, serverVersion });
-      continue;
-    }
+    if (pending.length > 0) {
+      const prepared = pending.map(op => {
+        const baseVersion = op.baseVersion ?? 0;
+        const version = baseVersion + 1;
+        const now = Date.now();
+        const payloadJson = op.operation === 'delete' ? null : JSON.stringify(op.payload ?? {});
+        return { op, baseVersion, version, now, payloadJson };
+      });
 
-    const version = serverVersion + 1;
-    const now = Date.now();
-    const payloadJson = op.operation === 'delete' ? null : JSON.stringify(op.payload ?? {});
-    await db.batch([
-      {
+      // Every entity mutation is an atomic compare-and-set. New entities may
+      // only be inserted from base version 0; existing entities update only when
+      // the server version exactly matches the client's base version.
+      const casResults = await transaction.batch(prepared.map(item => ({
         sql: `INSERT INTO sync_entities(user_id, entity_type, entity_id, version, payload_json, deleted_at, updated_at, last_operation_id)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              SELECT ?, ?, ?, ?, ?, ?, ?, ?
+              WHERE ? = 0 OR EXISTS (
+                SELECT 1 FROM sync_entities
+                WHERE user_id = ? AND entity_type = ? AND entity_id = ? AND version = ?
+              )
               ON CONFLICT(user_id, entity_type, entity_id) DO UPDATE SET
                 version = excluded.version,
                 payload_json = excluded.payload_json,
                 deleted_at = excluded.deleted_at,
                 updated_at = excluded.updated_at,
-                last_operation_id = excluded.last_operation_id`,
-        args: [auth.userId, op.entityType, op.entityId, version, payloadJson ?? '{}', op.operation === 'delete' ? now : null, now, op.operationId],
-      },
-      {
-        sql: `INSERT INTO sync_changes(user_id, entity_type, entity_id, operation, version, payload_json, device_id, operation_id, changed_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [auth.userId, op.entityType, op.entityId, op.operation, version, payloadJson, auth.deviceId, op.operationId, now],
-      },
-    ], 'write');
+                last_operation_id = excluded.last_operation_id
+              WHERE sync_entities.version = ?`,
+        args: [
+          auth.userId,
+          item.op.entityType,
+          item.op.entityId,
+          item.version,
+          item.payloadJson ?? '{}',
+          item.op.operation === 'delete' ? item.now : null,
+          item.now,
+          item.op.operationId,
+          item.baseVersion,
+          auth.userId,
+          item.op.entityType,
+          item.op.entityId,
+          item.baseVersion,
+          item.baseVersion,
+        ],
+      })));
 
-    const sequenceRow = (await db.execute({
-      sql: 'SELECT sequence FROM sync_changes WHERE user_id = ? AND operation_id = ?',
-      args: [auth.userId, op.operationId],
-    })).rows[0];
-    const sequence = Number(sequenceRow?.sequence ?? 0);
-    await db.execute({
-      sql: 'INSERT INTO processed_operations(user_id, operation_id, sequence, created_at) VALUES (?, ?, ?, ?)',
-      args: [auth.userId, op.operationId, sequence, now],
-    });
-    accepted.push({ operationId: op.operationId, sequence, version });
+      const succeeded = prepared.filter((_, index) => casResults[index].rowsAffected === 1);
+      const failed = prepared.filter((_, index) => casResults[index].rowsAffected !== 1);
+
+      if (succeeded.length > 0) {
+        // Append all accepted changes in one batch and use RETURNING so the
+        // operation receipt stores the exact sequence without a follow-up SELECT.
+        const changeResults = await transaction.batch(succeeded.map(item => ({
+          sql: `INSERT INTO sync_changes(user_id, entity_type, entity_id, operation, version, payload_json, device_id, operation_id, changed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING sequence`,
+          args: [
+            auth.userId,
+            item.op.entityType,
+            item.op.entityId,
+            item.op.operation,
+            item.version,
+            item.payloadJson,
+            auth.deviceId,
+            item.op.operationId,
+            item.now,
+          ],
+        })));
+
+        const receipts = succeeded.map((item, index) => {
+          const result = changeResults[index];
+          const sequence = Number(result.rows[0]?.sequence ?? result.lastInsertRowid ?? 0);
+          if (!Number.isFinite(sequence) || sequence <= 0) {
+            throw new HttpError(503, 'Could not determine the sync change sequence.');
+          }
+          return { item, sequence };
+        });
+
+        await transaction.batch(receipts.map(receipt => ({
+          sql: 'INSERT INTO processed_operations(user_id, operation_id, sequence, created_at) VALUES (?, ?, ?, ?)',
+          args: [auth.userId, receipt.item.op.operationId, receipt.sequence, receipt.item.now],
+        })));
+
+        for (const receipt of receipts) {
+          accepted.push({
+            operationId: receipt.item.op.operationId,
+            sequence: receipt.sequence,
+            version: receipt.item.version,
+          });
+        }
+      }
+
+      if (failed.length > 0) {
+        const conditions = failed.map(() => '(entity_type = ? AND entity_id = ?)').join(' OR ');
+        const versionRows = (await transaction.execute({
+          sql: `SELECT entity_type, entity_id, version FROM sync_entities
+                WHERE user_id = ? AND (${conditions})`,
+          args: [auth.userId, ...failed.flatMap(item => [item.op.entityType, item.op.entityId])],
+        })).rows;
+        const versions = new Map<string, number>(
+          versionRows.map(row => [
+            `${String(row.entity_type)}\u0000${String(row.entity_id)}`,
+            Number(row.version),
+          ]),
+        );
+        for (const item of failed) {
+          conflicts.push({
+            operationId: item.op.operationId,
+            entityType: item.op.entityType,
+            entityId: item.op.entityId,
+            serverVersion: versions.get(`${item.op.entityType}\u0000${item.op.entityId}`) ?? 0,
+          });
+        }
+      }
+    }
+
+    await transaction.commit();
+    return json({ ok: true, accepted, conflicts });
+  } finally {
+    transaction.close();
   }
-
-  return json({ ok: true, accepted, conflicts });
 }
 
 async function pull(url: URL, env: Env, db: Client, auth: AuthContext): Promise<Response> {

@@ -1,6 +1,8 @@
+# GitHub Actions overrides this local fallback with CLOUDFLARE_NAME.
 name = "koinly-sync-worker"
 main = "src/index.ts"
 compatibility_date = "2026-08-21"
+workers_dev = true
 
 [vars]
 ACCESS_TOKEN_TTL_SECONDS = "900"

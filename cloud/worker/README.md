@@ -23,21 +23,25 @@ secrets and are never shipped in the app.
 
 1. Create a Turso database.
 2. Apply `schema.sql`.
-3. Review `wrangler.toml` and adjust the Worker name if needed.
+3. Choose `CLOUDFLARE_NAME`; GitHub Actions passes it to Wrangler as the Worker name.
 4. Add deployment secrets in GitHub repo Settings > Secrets and variables >
    Actions:
 
 ```text
+CLOUDFLARE_NAME
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 TURSO_DATABASE_URL
 TURSO_AUTH_TOKEN
 JWT_SECRET
+TELEGRAM_BOT_TOKEN
+REGISTRATION_KEY_CHAT_ID
+REGISTRATION_ADMIN_SECRET
 ```
 
-The workflow uploads `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and
-`JWT_SECRET` to Cloudflare as Worker secrets during deploy, so you do not need
-to add them twice when deploying through GitHub Actions.
+The workflow uploads the database, authentication, and registration values to
+Cloudflare as Worker secrets during deploy, so you do not need to add them
+twice when deploying through GitHub Actions.
 
 If you deploy from your local terminal instead of GitHub Actions, add Worker
 runtime secrets manually:
@@ -46,6 +50,9 @@ runtime secrets manually:
 wrangler secret put TURSO_DATABASE_URL
 wrangler secret put TURSO_AUTH_TOKEN
 wrangler secret put JWT_SECRET
+wrangler secret put TELEGRAM_BOT_TOKEN
+wrangler secret put REGISTRATION_KEY_CHAT_ID
+wrangler secret put REGISTRATION_ADMIN_SECRET
 ```
 
 The Cloudflare API token must be scoped to the target Cloudflare account and have the Cloudflare
@@ -71,9 +78,9 @@ After changing the token in Cloudflare, replace the existing GitHub
 5. Deploy:
 
 ```bash
-npm install
+npm ci
 npm run schema:apply
-npm run deploy
+npx wrangler deploy --name my-koinly-sync
 ```
 
 The GitHub Actions workflow also runs `npm run schema:apply` before deploying.

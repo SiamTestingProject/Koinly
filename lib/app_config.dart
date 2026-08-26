@@ -14,16 +14,13 @@ const Color kSleekWarning = Color(0xFFF59E0B);
 const Color kSleekMuted = Color(0xFF90A4AD);
 
 const appTitle = 'Koinly';
-const appVersion = String.fromEnvironment('KOINLY_APP_VERSION', defaultValue: '1.0.70');
+const appVersion = String.fromEnvironment('KOINLY_APP_VERSION', defaultValue: '1.0.71');
 const backupPassword = 'YOUR_SECRET_PASSWORD';
 const kSyncAdminTelegramUrl = 'https://t.me/Ch0wdhury_Siam';
-final bool kLoansFeatureEnabled = bool.fromEnvironment('KOINLY_ENABLE_LOANS', defaultValue: true);
-
 const int kHomeTabIndex = 0;
 const int kAnalysisTabIndex = 1;
-int get kLoansTabIndex => 2;
-int get kTransactionTabIndex => kLoansFeatureEnabled ? 3 : 2;
-int get kCategoriesTabIndex => kLoansFeatureEnabled ? 4 : 3;
+const int kTransactionTabIndex = 2;
+const int kCategoriesTabIndex = 3;
 
 bool get kUsesDesktopSqlite => !kIsWeb && (Platform.isWindows || Platform.isLinux);
 bool get kIsDesktopApp => !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);

@@ -6,6 +6,12 @@ plugins {
     id "com.google.firebase.crashlytics"
 }
 
+def releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_FILE") ?: project.findProperty("ANDROID_KEYSTORE_FILE")
+def releaseKeystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: project.findProperty("ANDROID_KEYSTORE_PASSWORD")
+def releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: project.findProperty("ANDROID_KEY_ALIAS")
+def releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: project.findProperty("ANDROID_KEY_PASSWORD")
+def releaseSigningConfigured = [releaseKeystorePath, releaseKeystorePassword, releaseKeyAlias, releaseKeyPassword].every { value -> value != null && value.toString().trim() }
+
 android {
     namespace = "com.koinly.siam"
     compileSdk = 36
@@ -15,8 +21,8 @@ android {
         applicationId = "com.koinly.siam"
         minSdk = 23
         targetSdk = 36
-        versionCode = 71
-        versionName = "1.0.70"
+        versionCode = 72
+        versionName = "1.0.71"
         multiDexEnabled true
     }
 
@@ -30,24 +36,22 @@ android {
         jvmTarget = "17"
     }
 
-    def koinlyBundledReleaseKeystore = file("koinly-release.jks")
-
     signingConfigs {
         release {
-            if (koinlyBundledReleaseKeystore.exists()) {
-                storeFile koinlyBundledReleaseKeystore
-                storePassword "koinly-release"
-                keyAlias "koinly"
-                keyPassword "koinly-release"
+            if (releaseSigningConfigured) {
+                storeFile file(releaseKeystorePath)
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
             }
         }
     }
 
     buildTypes {
         release {
-            // Use a stable bundled development release key so APKs built on GitHub Actions
-            // can update each other. Random CI debug keys break Android in-place updates.
-            signingConfig koinlyBundledReleaseKeystore.exists() ? signingConfigs.release : signingConfigs.debug
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
@@ -56,6 +60,17 @@ android {
             applicationIdSuffix ".debug"
             versionNameSuffix "-debug"
         }
+    }
+}
+
+
+gradle.taskGraph.whenReady { graph ->
+    def releaseTaskRequested = graph.allTasks.any { task ->
+        def name = task.name.toLowerCase()
+        name == "assemblerelease" || name == "bundlerelease" || name.endsWith("release") && (name.startsWith("assemble") || name.startsWith("bundle"))
+    }
+    if (releaseTaskRequested && !releaseSigningConfigured) {
+        throw new GradleException("Release signing is not configured. Set ANDROID_KEYSTORE_FILE, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD.")
     }
 }
 

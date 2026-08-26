@@ -23,4 +23,9 @@ outputs/
 package_phase*/
 *.zip
 *.log
+# Local Android signing and machine-specific configuration
+android/app/*.jks
+android/app/*.keystore
+android/key.properties
+android/local.properties
 

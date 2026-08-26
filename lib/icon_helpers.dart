@@ -97,10 +97,6 @@ IconData iconFor(String name) {
     case 'theme_battery': return Icons.battery_saver_rounded;
     case 'flag': return Icons.flag_rounded;
     case 'profile': return Icons.account_circle_rounded;
-    case 'loan_given': return Icons.call_made_rounded;
-    case 'loan_taken': return Icons.call_received_rounded;
-    case 'loan_received': return Icons.south_west_rounded;
-    case 'loan_paid': return Icons.north_east_rounded;
     case 'check': return Icons.verified_rounded;
     case 'warning': return Icons.warning_amber_rounded;
     case 'reminder': return Icons.notifications_active_rounded;

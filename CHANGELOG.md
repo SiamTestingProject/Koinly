@@ -6,24 +6,27 @@
 
 - Added server-enforced, invite-key-based account registration with one active single-use key, atomic consumption/rotation, expiration, revocation, and an auditable Turso key ledger.
 - Added automatic Telegram delivery for each newly rotated registration key, delivery retry tracking, and protected administrator status/reveal/rotate/revoke/retry endpoints.
-- Loans are enabled again with a full workflow for given/taken loans, repayment history, repayment reminders, overdue alerts, account-balance updates, and cloud sync.
-- Loan records now include Pursenal-style detail fields for institution/provider, loan account number, agreement number, and interest rate.
 
 ### Fixed
 
+- Hardened account sync with transactional compare-and-set writes so concurrent devices cannot both accept the same entity base version.
+- Idempotent sync retries now return the version assigned by the original accepted operation instead of the stale client base version.
+- Budget scope edits and budget deletion now enqueue cloud tombstones for removed account/category mappings.
+- Removed runtime schema mutation from normal Cloudflare Worker requests; schema deployment remains an explicit deployment step.
+
 - Account signup now rejects missing, invalid, expired, revoked, and previously used registration keys with clear user-facing messages.
 - Latest release changelog now publishes only the current update notes instead of the full accumulated development history.
-- Loan create/edit and repayment dialogs now show clear user-facing messages when required fields are missing instead of silently doing nothing.
 
 ### Changed
 
+- Android release signing now requires injected keystore secrets; the release keystore and passwords are no longer stored in source.
+- Removed the obsolete debt-tracking and device-lock modules from the application UI, models, notifications, and dependencies.
+
 - The Create account form now requires a Registration Key and always relies on backend validation; Telegram tokens, chat IDs, and administrator credentials remain deployment secrets.
-- Loan screens now use friendlier wording, direct empty-state actions, clearer repayment progress, visible repayment action buttons, and a delete confirmation.
 - Added a Pursenal-style Load backup workflow in Settings that opens a file picker, loads a `.koinlybackup` file, replaces local data, and triggers the existing cloud-upload path when signed in.
 - Android package/application ID changed from `com.siamapps.koinly` to `com.koinly.siam`.
 - Transaction amount entry now uses the normal phone/desktop keyboard instead of Koinly's old custom on-screen keypad.
 - Release automation now falls back to only the first/current bullet under each Unreleased heading, so accidental older notes do not flood the newest GitHub Release body.
-- Restore/sync wording now treats loans as an active feature instead of hidden legacy data.
 
 ### Previous development history
 
@@ -83,7 +86,6 @@
 - Removed the Home Quick actions block for a cleaner dashboard.
 - Fixed the onboarding account setup Skip action so untouched starter accounts are removed instead of staying in the app.
 - Reduced route/tab motion and expensive background glow layers for smoother Android and Windows performance.
-- Temporarily hid the user-facing Loans feature while preserving legacy storage compatibility for a future re-add.
 - Optimized Android release CI by generating the Universal APK from the AAB instead of running a duplicate universal APK build.
 - Added a GitHub Releases-based in-app updater.
 - Added Settings → Updates with installed version, latest release, update status, release date, and GitHub release changelog.

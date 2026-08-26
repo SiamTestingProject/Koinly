@@ -28,10 +28,25 @@ class CloudSyncService {
     return normalized;
   }
 
+  static String validateApiBaseUrl(String value) {
+    final normalized = normalizeApiBaseUrl(value);
+    final uri = Uri.tryParse(normalized);
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.path.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment) {
+      throw StateError('Enter a valid HTTPS Worker URL without a path, query, or fragment.');
+    }
+    return normalized;
+  }
+
   static String resolveApiBaseUrl([String? savedValue]) {
-    final fromBuild = normalizeApiBaseUrl(defaultApiBaseUrl);
-    if (fromBuild.isNotEmpty) return fromBuild;
-    return normalizeApiBaseUrl(savedValue ?? '');
+    final provided = normalizeApiBaseUrl(savedValue ?? '');
+    if (provided.isNotEmpty) return provided;
+    return normalizeApiBaseUrl(defaultApiBaseUrl);
   }
 
   static Future<void> upload({
@@ -129,6 +144,40 @@ class KoinlySyncApi {
   final String baseUrl;
 
   Uri _uri(String path, [Map<String, String>? query]) => Uri.parse('${CloudSyncService.normalizeApiBaseUrl(baseUrl)}$path').replace(queryParameters: query);
+
+  Future<void> validateBackend() async {
+    final validatedBaseUrl = CloudSyncService.validateApiBaseUrl(baseUrl);
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$validatedBaseUrl/health'),
+            headers: const {'accept': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 20));
+      final decoded = response.body.trim().isEmpty ? null : jsonDecode(response.body);
+      final data = decoded is Map ? decoded.cast<String, dynamic>() : const <String, dynamic>{};
+      if (data['service'] != 'koinly-sync') {
+        throw const CloudSyncException('This URL is not a Koinly sync Worker.');
+      }
+      if (data['configured'] != true) {
+        throw const CloudSyncException('The Worker is missing required secrets.');
+      }
+      if (data['databaseReachable'] != true) {
+        throw const CloudSyncException('The Worker cannot connect to its Turso database.');
+      }
+      if (data['schemaReady'] != true || data['ok'] != true || response.statusCode < 200 || response.statusCode >= 300) {
+        throw const CloudSyncException('The Worker is reachable, but its Turso schema is not ready.');
+      }
+    } on TimeoutException {
+      throw const CloudSyncException('Worker validation timed out. Check the URL and try again.');
+    } on SocketException {
+      throw const CloudSyncException('The Worker could not be reached. Check the URL and network.');
+    } on http.ClientException {
+      throw const CloudSyncException('The Worker could not be reached. Check the URL and network.');
+    } on FormatException {
+      throw const CloudSyncException('The Worker returned an invalid health response.');
+    }
+  }
 
   Future<SyncAuthSession> register({
     required String email,

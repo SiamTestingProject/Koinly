@@ -8,7 +8,7 @@ A local-first personal finance tracker built in Flutter with a polished Material
 
 ## App versioning
 
-- Baseline source version: `1.0.70+71`
+- Baseline source version: `1.0.71+72`
 - GitHub Actions automatically stamps each release build with a newer version.
 - Generated version format: `1.0.<1000 + github.run_number>`
 - Android `versionName`, Android `versionCode`, `pubspec.yaml`, Windows installer version, and the in-app About screen version are updated during CI.
@@ -53,7 +53,7 @@ The project is being gradually split out of the original large single-file Flutt
 - `lib/icon_helpers.dart` contains shared icon lookup, custom-image icon handling, and reusable icon bubble rendering.
 - `lib/models.dart` contains finance enums, SQLite mapping models, date/color helpers, and data-health model types.
 - `lib/persistence_stores.dart` contains SharedPreferences and secure credential storage wrappers.
-- `lib/reminder_service.dart` contains local notification setup plus daily and loan repayment reminder scheduling.
+- `lib/reminder_service.dart` contains local notification setup and daily reminder scheduling.
 - `lib/sync_models.dart` contains shared sync exception/session data types.
 - `lib/sync_services.dart` contains legacy Cloudflare sync, account sync API client, and MongoDB snapshot sync helpers.
 - `lib/ui_foundation.dart` contains responsive breakpoints, shared motion/shape helpers, page transitions, pressable behavior, and scroll physics.
@@ -104,7 +104,7 @@ Release notes come from `CHANGELOG.md`. The workflow first looks for the current
 ## Performance notes
 
 - App shell rebuilds are scoped to the values that actually affect the shell, such as theme and selected tab.
-- Account, category, reminder, and balance lookups are cached after every database reload so long lists do not repeatedly scan the full in-memory dataset.
+- Account, category, and balance lookups are cached after every database reload so long lists do not repeatedly scan the full in-memory dataset.
 - Money formatting reuses cached formatters instead of creating a new formatter for every visible amount.
 - Home dashboard category totals reuse the already-filtered transaction list.
 - Background online sync uses incremental pulls and avoids global busy-state rebuilds; manual sync/sign-in can still fully overwrite local finance data when required.
@@ -264,7 +264,7 @@ Financial Health Summary is not a fixed Analysis page section. It appears automa
 
 The summary includes income, expenses, net flow, savings transfers, savings balance movement, current savings balance, recurring bills/subscriptions, paid/unpaid/upcoming/overdue bills, budget usage, remaining budget, overspent categories, and a health result.
 
-Possible status results include Saved Money, Overspent, Increased Debt, Reduced Debt, Stable Month, Stable Year, and Strong Savings Growth.
+Possible status results include Saved Money, Overspent, Stable Month, Stable Year, and Strong Savings Growth.
 
 Yearly view includes month-by-month income, expense, savings, bills, budget usage, best month, worst month, highest income month, highest expense month, highest savings month, and most overspent month.
 
@@ -282,11 +282,11 @@ Koinly supports CSV export, PDF export, filter-aware export data, shared export 
 
 ### Settings
 
-Settings includes theme, currency, currency symbol/code, prefix/suffix placement, number separators, daily reminder time, default account, default expense category, default income category, default date filter, Savings suggestion profile, export, Load backup, app lock/security, Account & sync, Updates, About, privacy policy, terms, and licenses.
+Settings includes theme, currency, currency symbol/code, prefix/suffix placement, number separators, daily reminder time, default account, default expense category, default income category, default date filter, Savings suggestion profile, export, Load backup, Account & sync, Updates, About, privacy policy, terms, and licenses.
 
 ### Hidden Settings
 
-Hidden Settings keeps secondary controls away from the main workflow. Examples include defaults, reorder tools, backup tools, and lock/security options.
+Hidden Settings keeps secondary controls away from the main workflow. Examples include defaults, reorder tools, and backup tools.
 
 ---
 
@@ -312,9 +312,9 @@ accounts removes the untouched Cash, Card, and Bank Account placeholders, saves
 that choice locally, and cleans those placeholders again if an older install,
 seed step, or sync pass tries to bring back the exact untouched starter set.
 
-The Cloudflare Worker URL is embedded at build time through the GitHub
-Actions/Flutter define `KOINLY_SYNC_API_BASE_URL`; it is not shown as an app
-setting.
+The build-time `KOINLY_SYNC_API_BASE_URL` remains the default service. In
+**Account & sync**, users can instead select **Self-hosted**, validate their
+own Worker URL, and use it for all account and synchronization requests.
 
 Normal app operations save to local SQLite first, update the UI immediately, and add an operation to the local `sync_outbox`. The background coordinator batches pending operations, pushes them to the Worker, pulls remote changes by server cursor, and applies them locally.
 
@@ -346,6 +346,171 @@ Koinly Flutter -> Cloudflare Worker -> Turso
 ```
 
 The older manual snapshot-style sync code and `backend/cloudflare-turso/` reference backend are retained as legacy reference material, but Account & sync is the normal multi-device path.
+
+---
+
+## Self-Hosted Cloud Sync
+
+Self-hosting is optional. Existing users can leave **Default** selected and
+continue using the Worker compiled into the app. A self-hosted setup keeps
+Turso credentials in the Worker and sends the Flutter app only the public
+Worker URL.
+
+### 1. Fork and enable the deployment workflow
+
+1. Fork this repository on GitHub.
+2. Open the fork's **Actions** tab and enable workflows if GitHub asks.
+3. Open **Settings > Secrets and variables > Actions** in the fork.
+4. Add the repository secrets listed below.
+5. Run **Actions > Deploy Sync Worker > Run workflow**. Later pushes that
+   change `cloud/worker/**` or the deployment workflow redeploy automatically.
+
+Do not put tokens in `wrangler.toml`, source files, workflow YAML, issues, or
+build logs.
+
+### 2. Create the Turso database
+
+Install and sign in to the [Turso CLI](https://docs.turso.tech/cli/introduction),
+then run:
+
+```bash
+turso db create koinly-sync
+turso db show koinly-sync --url
+turso db tokens create koinly-sync
+```
+
+Save the URL as `TURSO_DATABASE_URL` and the full-access database token as
+`TURSO_AUTH_TOKEN`. The Worker needs write access. The deployment workflow
+applies `cloud/worker/schema.sql` automatically; the schema is idempotent and
+does not erase existing sync data when redeployed.
+
+### 3. Create Cloudflare credentials and choose the Worker name
+
+Create a Cloudflare API token using the **Edit Cloudflare Workers** template,
+scope it to the account that will own the Worker, and copy that account's ID.
+Cloudflare's [GitHub Actions guide](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)
+explains both values.
+
+Choose a unique `CLOUDFLARE_NAME`, for example:
+
+```ini
+CLOUDFLARE_NAME=my-koinly-sync
+```
+
+The name must contain 1-63 lowercase letters, numbers, or dashes and cannot
+start or end with a dash. GitHub Actions passes it to `wrangler deploy --name`,
+so the committed fallback name is never the deployment identity for a fork.
+Cloudflare URLs include the account subdomain:
+
+```text
+https://my-koinly-sync.<your-account-subdomain>.workers.dev
+```
+
+See Cloudflare's [workers.dev naming and URL rules](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/).
+
+### 4. Add the required GitHub Actions secrets
+
+Add every value under **Repository secrets**:
+
+| Secret | Value |
+| --- | --- |
+| `CLOUDFLARE_NAME` | Worker name, such as `my-koinly-sync` |
+| `CLOUDFLARE_API_TOKEN` | Account-scoped Cloudflare deployment token |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
+| `TURSO_DATABASE_URL` | URL returned by `turso db show ... --url` |
+| `TURSO_AUTH_TOKEN` | Full-access token returned by `turso db tokens create` |
+| `JWT_SECRET` | Unique random secret of at least 32 characters |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token used to deliver registration keys |
+| `REGISTRATION_KEY_CHAT_ID` | Private Telegram user, group, or channel chat ID |
+| `REGISTRATION_ADMIN_SECRET` | Different random administrator secret of at least 32 characters |
+
+`CLOUDFLARE_NAME` is not sensitive, so the workflow also accepts it as a
+repository variable. Keeping it with the deployment secrets makes the fork
+setup a single checklist. Never reuse `JWT_SECRET` as
+`REGISTRATION_ADMIN_SECRET`; changing `JWT_SECRET` later invalidates sessions
+and makes previously encrypted registration keys unreadable.
+
+### 5. Deploy and find the Worker URL
+
+The **Deploy Sync Worker** workflow:
+
+1. checks for missing values and validates the Worker/secret lengths;
+2. typechecks the Worker;
+3. applies the Turso schema;
+4. uploads runtime credentials as Cloudflare Worker secrets;
+5. deploys using `CLOUDFLARE_NAME`;
+6. derives the account's exact `workers.dev` URL;
+7. checks `/health`; and
+8. creates and delivers an active registration key.
+
+On success, the exact URL appears in the workflow log and job summary as
+**Worker URL**. Opening `<Worker URL>/health` should return JSON containing:
+
+```json
+{
+  "service": "koinly-sync",
+  "ok": true,
+  "databaseReachable": true,
+  "schemaReady": true
+}
+```
+
+### 6. Connect the app
+
+1. Open **Settings > Account & sync**.
+2. Under **Cloud sync service**, select **Self-hosted**.
+3. Paste the URL reported by GitHub Actions. Paste only the HTTPS origin, with
+   no `/health`, path, query, or fragment.
+4. Press **Validate and use Worker**.
+5. Create an account with the registration key delivered to Telegram, or sign
+   in to an account already stored in that Turso database.
+
+The app enables the custom endpoint only after `/health` identifies a Koinly
+Worker whose secrets, database connection, and schema are ready. Auth,
+refresh, logout, upload, download, automatic foreground sync, and manual sync
+then all use that URL.
+
+To return to the built-in service, select **Default** and press **Use default
+service**. Changing either direction signs out the current backend session,
+because default and self-hosted accounts and tokens are independent. Local
+finance data is not deleted by switching; the normal login warning still
+applies before downloading and replacing local data.
+
+### Updating or redeploying
+
+- Push Worker changes to `main` or `master` to redeploy automatically.
+- Use **Actions > Deploy Sync Worker > Run workflow** to redeploy without a
+  source change or after rotating a GitHub secret.
+- Keep the same `CLOUDFLARE_NAME` and Turso database to update in place.
+- Changing the Worker name creates a different URL; validate and save the new
+  URL in every app installation.
+- Changing the Turso database points the Worker at a different sync account
+  store. Apply the workflow before signing in from the app.
+
+### Self-hosted troubleshooting
+
+- **Missing secret:** add the exact name shown by the workflow under
+  **Settings > Secrets and variables > Actions**, then rerun it.
+- **Cloudflare authentication error / code 10000:** recreate the token with
+  the Edit Cloudflare Workers template, scope it to the correct account, and
+  confirm `CLOUDFLARE_ACCOUNT_ID` belongs to that account.
+- **Invalid Worker name:** use only lowercase letters, numbers, and internal
+  dashes; keep it at 63 characters or fewer.
+- **Turso schema or connection failure:** regenerate a full-access Turso token,
+  verify the database URL, and rerun the workflow so `schema.sql` is applied.
+- **Worker health check fails:** open `/health`; `configured: false` means a
+  Worker secret is missing, `databaseReachable: false` points to Turso
+  credentials/network access, and `schemaReady: false` means schema setup did
+  not complete.
+- **Registration key delivery fails:** confirm the bot token and chat ID, add
+  the bot to the target group/channel if applicable, then rerun the workflow or
+  use the protected registration-key retry endpoint documented below.
+- **The app rejects the URL:** use `https://`, remove `/health` and trailing
+  paths, confirm `/health` returns the four values above, and check device
+  network or TLS filtering.
+- **Login fails after switching services:** create or use an account on the
+  selected backend; accounts from the default service are not copied to a
+  self-hosted Turso database.
 
 ---
 
@@ -389,7 +554,6 @@ adding an account, restoring a backup, or signing in to restore the cloud copy.
 | File picker | `file_picker` |
 | Sharing | `share_plus` |
 | Secure storage | `flutter_secure_storage` |
-| Biometrics/device auth | `local_auth` |
 | Notifications | `flutter_local_notifications` |
 | Time zones | `timezone` |
 | Firebase | Analytics + Crashlytics |
@@ -429,20 +593,9 @@ The app is currently implemented mainly in `lib/main.dart`. GitHub Actions can r
 
 ## Data model overview
 
-The app stores local data for accounts, categories, transactions, budgets, loans, loan repayments, loan repayment reminders, savings suggestion profile, daily savings suggestion seen status, settings/preferences, backup metadata, and sync metadata.
+The app stores local data for accounts, categories, transactions, budgets, savings suggestion profile, daily savings suggestion seen status, settings/preferences, backup metadata, and sync metadata.
 
 Important classification fields include transaction type, account IDs, category ID, transfer target, created date/time, reminder status, and budget scope.
-
----
-
-## Loan workflow
-
-Koinly supports two loan directions:
-
-- **Given loans** track money someone owes you. Creating one reduces the selected account balance, and repayments increase it later.
-- **Taken loans** track money you owe someone else. Creating one increases the selected account balance, and repayments reduce it later.
-
-Loan records support repayment history, repayment reminders, overdue alerts, institution/provider details, account/agreement numbers, interest rate, local backup/restore, and account-based cloud sync.
 
 ---
 
@@ -537,7 +690,7 @@ Workflow behavior:
 - uses `--no-pub` after dependency restore so release builds do not resolve packages repeatedly
 - generates the Universal APK from the AAB with bundletool instead of running a separate universal APK compile
 - uploads already-compressed APK/EXE artifacts with artifact compression disabled for faster transfer
-- preserves Android signing support
+- requires Android release signing secrets and never stores the release keystore in the repository
 - preserves Windows signing support
 - generates Windows installer
 - publishes APKs, AAB, and the Windows setup installer to a new versioned stable GitHub Release for every build
@@ -590,9 +743,9 @@ the next update.
 
 ## Release signing
 
-Android release signing support is preserved.
+Android release signing is secret-driven. The release `.jks`/keystore and its passwords are **not stored in the repository**. GitHub Actions decodes the keystore into the runner's temporary directory for the build, and Gradle refuses to produce a release build when signing configuration is missing.
 
-Typical Android secret names:
+Required Android repository secrets:
 
 ```text
 ANDROID_KEYSTORE_BASE64
@@ -600,6 +753,8 @@ ANDROID_KEYSTORE_PASSWORD
 ANDROID_KEY_ALIAS
 ANDROID_KEY_PASSWORD
 ```
+
+For a local release build, set `ANDROID_KEYSTORE_FILE` to the local keystore path and provide `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` in the environment. Do not commit the keystore or `android/key.properties`.
 
 Windows code signing is optional.
 
@@ -650,6 +805,7 @@ GitHub Actions deployment expects all deployment values to be stored as
 repository secrets:
 
 ```text
+CLOUDFLARE_NAME
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 TURSO_DATABASE_URL
@@ -660,10 +816,11 @@ REGISTRATION_KEY_CHAT_ID
 REGISTRATION_ADMIN_SECRET
 ```
 
-The deploy workflow passes the database, authentication, registration-key,
-and Telegram values to Cloudflare as Worker secrets with `wrangler deploy
---secrets-file`, so you can manage all deploy-time values from GitHub repo
-Settings > Secrets and variables > Actions.
+The deploy workflow uses `CLOUDFLARE_NAME` as the Wrangler deployment name and
+passes the database, authentication, registration-key, and Telegram values to
+Cloudflare as Worker secrets with `wrangler deploy --secrets-file`, so you can
+manage all deploy-time values from GitHub repo Settings > Secrets and variables
+> Actions.
 
 The same workflow also applies `cloud/worker/schema.sql` to Turso before
 deploying the Worker. The schema is idempotent, so rerunning the workflow keeps
@@ -688,9 +845,9 @@ Deploy from terminal:
 
 ```bash
 cd cloud/worker
-npm install
+npm ci
 npm run schema:apply
-npx wrangler deploy
+npx wrangler deploy --name "$CLOUDFLARE_NAME"
 ```
 
 After deploy, open the Worker URL in a browser. `/` should return a JSON
@@ -761,7 +918,7 @@ The old `backend/cloudflare-turso/` snapshot/admin-approval backend is retained 
 ## Online sync user flow
 
 1. User opens Account & sync.
-2. The app uses the Worker URL embedded at build time through `KOINLY_SYNC_API_BASE_URL`.
+2. The app uses either the default build-time Worker or the validated self-hosted Worker selected in Account & sync.
 3. User creates an account with the current single-use registration key, or signs in.
 4. Create account adopts existing local data into the new account through the outbox.
 5. Login clears local finance data and replaces it with the cloud account data.

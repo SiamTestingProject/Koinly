@@ -1,6 +1,4 @@
 import 'dart:convert';
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 // -----------------------------------------------------------------------------
@@ -10,8 +8,6 @@ import 'package:intl/intl.dart';
 enum AccountType { regular, credit, savings }
 enum CategoryType { income, expense }
 enum MoneyTransactionType { income, expense, transfer }
-enum LoanType { given, taken }
-enum LoanStatus { open, completed }
 enum DateRangeType { today, thisWeek, thisMonth, thisYear, allTime, custom }
 enum FinancialHealthPeriod { monthly, yearly }
 enum CurrencyPosition { prefix, suffix }
@@ -249,13 +245,6 @@ class Category {
         createdOn: dateFromDb(map['created_on']),
         updatedOn: dateFromDb(map['updated_on']),
       );
-
-  bool get isLoanSystemCategory => const {
-        'Loan Given',
-        'Loan Taken',
-        'Loan Repayment Received',
-        'Loan Repayment Paid',
-      }.contains(name);
 }
 
 class MoneyTransaction {
@@ -268,8 +257,6 @@ class MoneyTransaction {
     required this.fromAccountId,
     this.toAccountId,
     this.imagePath = '',
-    this.loanId,
-    this.repaymentId,
     required this.createdOn,
     required this.updatedOn,
   });
@@ -282,29 +269,12 @@ class MoneyTransaction {
   final String fromAccountId;
   final String? toAccountId;
   final String imagePath;
-  final String? loanId;
-  final String? repaymentId;
   final DateTime createdOn;
   final DateTime updatedOn;
 
-  bool get isLoanMovement => loanId != null;
-  bool get isLoanPrincipal => loanId != null && repaymentId == null;
-  bool get isLoanRepayment => loanId != null && repaymentId != null;
-
-  // Loan principal and repayment movements update account balances, but they are
-  // balance-sheet movements rather than income or expense for reports.
-  bool get countsAsIncome => type == MoneyTransactionType.income && !isLoanMovement;
-  bool get countsAsExpense => type == MoneyTransactionType.expense && !isLoanMovement;
-
-  String get displayType {
-    if (isLoanPrincipal) {
-      return type == MoneyTransactionType.income ? 'Loan Taken' : 'Loan Given';
-    }
-    if (isLoanRepayment) {
-      return type == MoneyTransactionType.income ? 'Loan Repayment Received' : 'Loan Repayment Paid';
-    }
-    return enumName(type);
-  }
+  bool get countsAsIncome => type == MoneyTransactionType.income;
+  bool get countsAsExpense => type == MoneyTransactionType.expense;
+  String get displayType => enumName(type);
 
   MoneyTransaction copyWith({
     String? id,
@@ -315,8 +285,6 @@ class MoneyTransaction {
     String? fromAccountId,
     String? toAccountId,
     String? imagePath,
-    String? loanId,
-    String? repaymentId,
     DateTime? createdOn,
     DateTime? updatedOn,
   }) => MoneyTransaction(
@@ -328,8 +296,6 @@ class MoneyTransaction {
         fromAccountId: fromAccountId ?? this.fromAccountId,
         toAccountId: toAccountId ?? this.toAccountId,
         imagePath: imagePath ?? this.imagePath,
-        loanId: loanId ?? this.loanId,
-        repaymentId: repaymentId ?? this.repaymentId,
         createdOn: createdOn ?? this.createdOn,
         updatedOn: updatedOn ?? this.updatedOn,
       );
@@ -343,8 +309,6 @@ class MoneyTransaction {
         'from_account_id': fromAccountId,
         'to_account_id': toAccountId,
         'image_path': imagePath,
-        'loan_id': loanId,
-        'repayment_id': repaymentId,
         'created_on': dateToDb(createdOn),
         'updated_on': dateToDb(updatedOn),
       };
@@ -358,8 +322,6 @@ class MoneyTransaction {
         fromAccountId: map['from_account_id'] as String? ?? '',
         toAccountId: map['to_account_id'] as String?,
         imagePath: map['image_path'] as String? ?? '',
-        loanId: map['loan_id'] as String?,
-        repaymentId: map['repayment_id'] as String?,
         createdOn: dateFromDb(map['created_on']),
         updatedOn: dateFromDb(map['updated_on']),
       );
@@ -489,265 +451,6 @@ class DataHealthReport {
     return '${items.length} item${items.length == 1 ? '' : 's'} found during the last check.';
   }
 }
-
-class Loan {
-  Loan({
-    required this.id,
-    required this.type,
-    required this.accountId,
-    required this.personName,
-    required this.amount,
-    required this.loanDate,
-    this.dueDate,
-    this.institution = '',
-    this.accountNo = '',
-    this.agreementNo = '',
-    this.interestRate,
-    required this.notes,
-    required this.repaidAmount,
-    required this.status,
-    required this.createdOn,
-    required this.updatedOn,
-  });
-
-  final String id;
-  final LoanType type;
-  final String accountId;
-  final String personName;
-  final double amount;
-  final DateTime loanDate;
-  final DateTime? dueDate;
-  final String institution;
-  final String accountNo;
-  final String agreementNo;
-  final double? interestRate;
-  final String notes;
-  final double repaidAmount;
-  final LoanStatus status;
-  final DateTime createdOn;
-  final DateTime updatedOn;
-
-  double get remainingAmount => math.max<double>(0.0, amount - repaidAmount);
-  bool get isCompleted => status == LoanStatus.completed || remainingAmount <= 0.0001;
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'type': enumName(type),
-        'account_id': accountId,
-        'person_name': personName,
-        'amount': amount,
-        'loan_date': dateToDb(loanDate),
-        'due_date': dueDate == null ? null : dateToDb(dueDate!),
-        'institution': institution,
-        'account_no': accountNo,
-        'agreement_no': agreementNo,
-        'interest_rate': interestRate,
-        'notes': notes,
-        'repaid_amount': repaidAmount,
-        'status': enumName(status),
-        'created_on': dateToDb(createdOn),
-        'updated_on': dateToDb(updatedOn),
-      };
-
-  static Loan fromMap(Map<String, Object?> map) => Loan(
-        id: map['id'] as String,
-        type: enumByName(LoanType.values, map['type'] as String?, LoanType.given),
-        accountId: map['account_id'] as String? ?? '',
-        personName: map['person_name'] as String? ?? '',
-        amount: (map['amount'] as num? ?? 0).toDouble(),
-        loanDate: dateFromDb(map['loan_date']),
-        dueDate: map['due_date'] == null ? null : dateFromDb(map['due_date']),
-        institution: map['institution'] as String? ?? '',
-        accountNo: map['account_no'] as String? ?? '',
-        agreementNo: map['agreement_no'] as String? ?? '',
-        interestRate: (map['interest_rate'] as num?)?.toDouble(),
-        notes: map['notes'] as String? ?? '',
-        repaidAmount: (map['repaid_amount'] as num? ?? 0).toDouble(),
-        status: enumByName(LoanStatus.values, map['status'] as String?, LoanStatus.open),
-        createdOn: dateFromDb(map['created_on']),
-        updatedOn: dateFromDb(map['updated_on']),
-      );
-
-  Loan copyWith({
-    String? id,
-    LoanType? type,
-    String? accountId,
-    String? personName,
-    double? amount,
-    DateTime? loanDate,
-    DateTime? dueDate,
-    String? institution,
-    String? accountNo,
-    String? agreementNo,
-    double? interestRate,
-    String? notes,
-    double? repaidAmount,
-    LoanStatus? status,
-    DateTime? createdOn,
-    DateTime? updatedOn,
-  }) => Loan(
-        id: id ?? this.id,
-        type: type ?? this.type,
-        accountId: accountId ?? this.accountId,
-        personName: personName ?? this.personName,
-        amount: amount ?? this.amount,
-        loanDate: loanDate ?? this.loanDate,
-        dueDate: dueDate ?? this.dueDate,
-        institution: institution ?? this.institution,
-        accountNo: accountNo ?? this.accountNo,
-        agreementNo: agreementNo ?? this.agreementNo,
-        interestRate: interestRate ?? this.interestRate,
-        notes: notes ?? this.notes,
-        repaidAmount: repaidAmount ?? this.repaidAmount,
-        status: status ?? this.status,
-        createdOn: createdOn ?? this.createdOn,
-        updatedOn: updatedOn ?? this.updatedOn,
-      );
-}
-
-class LoanRepayment {
-  LoanRepayment({
-    required this.id,
-    required this.loanId,
-    required this.accountId,
-    required this.amount,
-    required this.paidOn,
-    required this.notes,
-    required this.createdOn,
-  });
-
-  final String id;
-  final String loanId;
-  final String accountId;
-  final double amount;
-  final DateTime paidOn;
-  final String notes;
-  final DateTime createdOn;
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'loan_id': loanId,
-        'account_id': accountId,
-        'amount': amount,
-        'paid_on': dateToDb(paidOn),
-        'notes': notes,
-        'created_on': dateToDb(createdOn),
-      };
-
-  static LoanRepayment fromMap(Map<String, Object?> map) => LoanRepayment(
-        id: map['id'] as String,
-        loanId: map['loan_id'] as String? ?? '',
-        accountId: map['account_id'] as String? ?? '',
-        amount: (map['amount'] as num? ?? 0).toDouble(),
-        paidOn: dateFromDb(map['paid_on']),
-        notes: map['notes'] as String? ?? '',
-        createdOn: dateFromDb(map['created_on']),
-      );
-}
-
-
-class LoanRepaymentReminder {
-  LoanRepaymentReminder({
-    required this.id,
-    required this.loanId,
-    required this.accountId,
-    required this.amount,
-    required this.dueDate,
-    required this.reminderTimeMinutes,
-    required this.notes,
-    required this.isPaid,
-    this.paidOn,
-    required this.createdOn,
-    required this.updatedOn,
-  });
-
-  final String id;
-  final String loanId;
-  final String accountId;
-  final double amount;
-  final DateTime dueDate;
-  final int reminderTimeMinutes;
-  final String notes;
-  final bool isPaid;
-  final DateTime? paidOn;
-  final DateTime createdOn;
-  final DateTime updatedOn;
-
-  bool get isOverdue {
-    if (isPaid) return false;
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final dueDay = DateTime(dueDate.year, dueDate.month, dueDate.day);
-    return dueDay.isBefore(today);
-  }
-
-  bool get isDueToday {
-    if (isPaid) return false;
-    final now = DateTime.now();
-    return dueDate.year == now.year && dueDate.month == now.month && dueDate.day == now.day;
-  }
-
-  DateTime get reminderAt {
-    final hour = reminderTimeMinutes ~/ 60;
-    final minute = reminderTimeMinutes % 60;
-    return DateTime(dueDate.year, dueDate.month, dueDate.day, hour, minute);
-  }
-
-  Map<String, Object?> toMap() => {
-        'id': id,
-        'loan_id': loanId,
-        'account_id': accountId,
-        'amount': amount,
-        'due_date': dateToDb(dueDate),
-        'reminder_time_minutes': reminderTimeMinutes,
-        'notes': notes,
-        'is_paid': isPaid ? 1 : 0,
-        'paid_on': paidOn == null ? null : dateToDb(paidOn!),
-        'created_on': dateToDb(createdOn),
-        'updated_on': dateToDb(updatedOn),
-      };
-
-  static LoanRepaymentReminder fromMap(Map<String, Object?> map) => LoanRepaymentReminder(
-        id: map['id'] as String,
-        loanId: map['loan_id'] as String? ?? '',
-        accountId: map['account_id'] as String? ?? '',
-        amount: (map['amount'] as num? ?? 0).toDouble(),
-        dueDate: dateFromDb(map['due_date']),
-        reminderTimeMinutes: (map['reminder_time_minutes'] as num? ?? (9 * 60)).toInt(),
-        notes: map['notes'] as String? ?? '',
-        isPaid: (map['is_paid'] as num? ?? 0).toInt() == 1,
-        paidOn: map['paid_on'] == null ? null : dateFromDb(map['paid_on']),
-        createdOn: dateFromDb(map['created_on']),
-        updatedOn: dateFromDb(map['updated_on']),
-      );
-
-  LoanRepaymentReminder copyWith({
-    String? id,
-    String? loanId,
-    String? accountId,
-    double? amount,
-    DateTime? dueDate,
-    int? reminderTimeMinutes,
-    String? notes,
-    bool? isPaid,
-    DateTime? paidOn,
-    DateTime? createdOn,
-    DateTime? updatedOn,
-  }) => LoanRepaymentReminder(
-        id: id ?? this.id,
-        loanId: loanId ?? this.loanId,
-        accountId: accountId ?? this.accountId,
-        amount: amount ?? this.amount,
-        dueDate: dueDate ?? this.dueDate,
-        reminderTimeMinutes: reminderTimeMinutes ?? this.reminderTimeMinutes,
-        notes: notes ?? this.notes,
-        isPaid: isPaid ?? this.isPaid,
-        paidOn: paidOn ?? this.paidOn,
-        createdOn: createdOn ?? this.createdOn,
-        updatedOn: updatedOn ?? this.updatedOn,
-      );
-}
-
 
 class SavingsSuggestionProfile {
   const SavingsSuggestionProfile({

@@ -93,6 +93,26 @@ jobs:
       - name: Prepare artifact folder
         run: mkdir -p artifacts
 
+      - name: Prepare Android release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required Android signing secret: $name"
+              exit 1
+            fi
+          done
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/koinly-release.jks"
+          chmod 600 "$RUNNER_TEMP/koinly-release.jks"
+          echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/koinly-release.jks" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
+
       - name: Validate sync backend build config
         env:
           KOINLY_SYNC_API_BASE_URL: ${{ secrets.KOINLY_SYNC_API_BASE_URL || vars.KOINLY_SYNC_API_BASE_URL }}
@@ -127,10 +147,10 @@ jobs:
             --bundle=build/app/outputs/bundle/release/app-release.aab \
             --output=artifacts/koinly-universal.apks \
             --mode=universal \
-            --ks=android/app/koinly-release.jks \
-            --ks-key-alias=koinly \
-            --ks-pass=pass:koinly-release \
-            --key-pass=pass:koinly-release \
+            --ks="$ANDROID_KEYSTORE_FILE" \
+            --ks-key-alias="$ANDROID_KEY_ALIAS" \
+            --ks-pass="pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --key-pass="pass:$ANDROID_KEY_PASSWORD" \
             --overwrite
 
           unzip -p artifacts/koinly-universal.apks universal.apk > "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}-universal.apk"

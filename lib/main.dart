@@ -16,7 +16,6 @@ import 'package:flutter/cupertino.dart' hide Category, Summary;
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
-import 'package:local_auth/local_auth.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
@@ -89,18 +88,19 @@ class KoinlyDatabase {
     final path = p.join(dir, 'koinly_flutter.db');
     _db = await sql.openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: (database, version) async {
         await _createSchema(database);
         await _seed(database);
       },
       onUpgrade: (database, oldVersion, newVersion) async {
         await _createSchema(database);
-        await _migrateLoanAccountSelection(database);
+        if (oldVersion < 6) {
+          await _removeLegacyLoanFeatureData(database);
+        }
       },
       onOpen: (database) async {
         await _createSchema(database);
-        await _migrateLoanAccountSelection(database);
       },
     );
     return _db!;
@@ -142,8 +142,6 @@ class KoinlyDatabase {
         from_account_id TEXT NOT NULL,
         to_account_id TEXT,
         image_path TEXT NOT NULL DEFAULT '',
-        loan_id TEXT,
-        repayment_id TEXT,
         created_on INTEGER NOT NULL,
         updated_on INTEGER NOT NULL
       )
@@ -171,52 +169,6 @@ class KoinlyDatabase {
         budget_id TEXT NOT NULL,
         category_id TEXT NOT NULL,
         PRIMARY KEY(budget_id, category_id)
-      )
-    ''');
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS loans(
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        account_id TEXT NOT NULL,
-        person_name TEXT NOT NULL,
-        amount REAL NOT NULL,
-        loan_date INTEGER NOT NULL,
-        due_date INTEGER,
-        institution TEXT NOT NULL DEFAULT '',
-        account_no TEXT NOT NULL DEFAULT '',
-        agreement_no TEXT NOT NULL DEFAULT '',
-        interest_rate REAL,
-        notes TEXT NOT NULL,
-        repaid_amount REAL NOT NULL DEFAULT 0,
-        status TEXT NOT NULL,
-        created_on INTEGER NOT NULL,
-        updated_on INTEGER NOT NULL
-      )
-    ''');
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS loan_repayments(
-        id TEXT PRIMARY KEY,
-        loan_id TEXT NOT NULL,
-        account_id TEXT NOT NULL DEFAULT '',
-        amount REAL NOT NULL,
-        paid_on INTEGER NOT NULL,
-        notes TEXT NOT NULL,
-        created_on INTEGER NOT NULL
-      )
-    ''');
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS loan_repayment_reminders(
-        id TEXT PRIMARY KEY,
-        loan_id TEXT NOT NULL,
-        account_id TEXT NOT NULL DEFAULT '',
-        amount REAL NOT NULL,
-        due_date INTEGER NOT NULL,
-        reminder_time_minutes INTEGER NOT NULL DEFAULT 540,
-        notes TEXT NOT NULL,
-        is_paid INTEGER NOT NULL DEFAULT 0,
-        paid_on INTEGER,
-        created_on INTEGER NOT NULL,
-        updated_on INTEGER NOT NULL
       )
     ''');
     await database.execute('''
@@ -263,57 +215,110 @@ class KoinlyDatabase {
     await database.execute('CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open ON sync_conflicts(resolved_at, created_at)');
   }
 
-  Future<void> _migrateLoanAccountSelection(sql.Database database) async {
-    for (final statement in const [
-      "ALTER TABLE loans ADD COLUMN institution TEXT NOT NULL DEFAULT ''",
-      "ALTER TABLE loans ADD COLUMN account_no TEXT NOT NULL DEFAULT ''",
-      "ALTER TABLE loans ADD COLUMN agreement_no TEXT NOT NULL DEFAULT ''",
-      "ALTER TABLE loans ADD COLUMN interest_rate REAL",
-    ]) {
-      try {
-        await database.execute(statement);
-      } catch (_) {
-        // Column already exists on fresh installs or after a previous migration.
+  Future<void> _removeLegacyLoanFeatureData(sql.Database database) async {
+    const legacyEntityTables = [
+      'loan_repayment_reminders',
+      'loan_repayments',
+      'loans',
+    ];
+    const legacyCategoryNames = [
+      'Loan Given',
+      'Loan Taken',
+      'Loan Repayment Received',
+      'Loan Repayment Paid',
+    ];
+
+    final tableRows = await database.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'");
+    final existingTables = tableRows.map((row) => row['name']?.toString() ?? '').toSet();
+    final transactionColumns = existingTables.contains('transactions')
+        ? (await database.rawQuery('PRAGMA table_info(transactions)')).map((row) => row['name']?.toString() ?? '').toSet()
+        : <String>{};
+
+    await database.transaction((txn) async {
+      // Queue cloud tombstones before removing legacy local records.
+      if (existingTables.contains('sync_outbox')) {
+        for (final table in legacyEntityTables) {
+          if (!existingTables.contains(table)) continue;
+          final rows = await txn.query(table, columns: ['id']);
+          for (final row in rows) {
+            final entityId = row['id']?.toString() ?? '';
+            if (entityId.isEmpty) continue;
+            final versionRows = await txn.query(
+              'sync_entity_versions',
+              columns: ['version'],
+              where: 'entity_type = ? AND entity_id = ?',
+              whereArgs: [table, entityId],
+              limit: 1,
+            );
+            final baseVersion = versionRows.isEmpty ? 0 : ((versionRows.first['version'] as num?)?.toInt() ?? 0);
+            await txn.insert(
+              'sync_outbox',
+              {
+                'id': _uuid.v4(),
+                'entity_type': table,
+                'entity_id': entityId,
+                'operation': 'delete',
+                'payload_json': null,
+                'base_version': baseVersion,
+                'created_at': DateTime.now().millisecondsSinceEpoch,
+              },
+              conflictAlgorithm: sql.ConflictAlgorithm.replace,
+            );
+          }
+        }
       }
-    }
 
-    try {
-      await database.execute("ALTER TABLE loan_repayments ADD COLUMN account_id TEXT NOT NULL DEFAULT ''");
-    } catch (_) {
-      // Column already exists on fresh installs or after a previous migration.
-    }
-
-    // Backfill repayment account links from older hidden repayment
-    // transactions before those legacy rows are removed.
-    final legacyRepaymentTx = await database.query(
-      'transactions',
-      columns: ['repayment_id', 'from_account_id'],
-      where: "repayment_id IS NOT NULL AND repayment_id != ''",
-    );
-    for (final tx in legacyRepaymentTx) {
-      final repaymentId = tx['repayment_id'] as String? ?? '';
-      final accountId = tx['from_account_id'] as String? ?? '';
-      if (repaymentId.isNotEmpty && accountId.isNotEmpty) {
-        await database.update('loan_repayments', {'account_id': accountId}, where: 'id = ?', whereArgs: [repaymentId]);
+      // Rebuild transactions without obsolete loan linkage columns and rows.
+      if (transactionColumns.contains('loan_id') || transactionColumns.contains('repayment_id')) {
+        await txn.execute('DROP TABLE IF EXISTS transactions_v6_clean');
+        await txn.execute('''
+          CREATE TABLE transactions_v6_clean(
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            notes TEXT NOT NULL,
+            category_id TEXT NOT NULL,
+            from_account_id TEXT NOT NULL,
+            to_account_id TEXT,
+            image_path TEXT NOT NULL DEFAULT '',
+            created_on INTEGER NOT NULL,
+            updated_on INTEGER NOT NULL
+          )
+        ''');
+        final keepCondition = transactionColumns.contains('loan_id') ? 'WHERE loan_id IS NULL' : '';
+        await txn.execute('''
+          INSERT INTO transactions_v6_clean(
+            id, type, amount, notes, category_id, from_account_id,
+            to_account_id, image_path, created_on, updated_on
+          )
+          SELECT id, type, amount, notes, category_id, from_account_id,
+                 to_account_id, image_path, created_on, updated_on
+          FROM transactions $keepCondition
+        ''');
+        await txn.execute('DROP TABLE transactions');
+        await txn.execute('ALTER TABLE transactions_v6_clean RENAME TO transactions');
       }
-    }
 
-    // Older builds stored loan balance movements as hidden income/expense
-    // transactions. The new loan system keeps loans separate and applies
-    // balance changes directly to the selected account, so those legacy rows
-    // should not remain in the normal transaction table.
-    await database.delete('transactions', where: 'loan_id IS NOT NULL');
-    await database.delete('categories', where: "name IN ('Loan Given', 'Loan Taken', 'Loan Repayment Received', 'Loan Repayment Paid')");
-
-    // Backfill repayment account links from the parent loan when possible.
-    final emptyRepayments = await database.query('loan_repayments', where: "account_id = '' OR account_id IS NULL");
-    for (final repayment in emptyRepayments) {
-      final loanId = repayment['loan_id'] as String? ?? '';
-      final loanRows = await database.query('loans', columns: ['account_id'], where: 'id = ?', whereArgs: [loanId], limit: 1);
-      if (loanRows.isNotEmpty) {
-        await database.update('loan_repayments', {'account_id': loanRows.first['account_id'] ?? ''}, where: 'id = ?', whereArgs: [repayment['id']]);
+      for (final table in legacyEntityTables) {
+        if (existingTables.contains(table)) {
+          await txn.execute('DROP TABLE IF EXISTS $table');
+        }
       }
-    }
+
+      // Do not delete a same-named user category if a normal transaction uses it.
+      for (final name in legacyCategoryNames) {
+        await txn.rawDelete(
+          'DELETE FROM categories WHERE name = ? AND id NOT IN (SELECT category_id FROM transactions)',
+          [name],
+        );
+      }
+      if (existingTables.contains('sync_conflicts')) {
+        await txn.delete(
+          'sync_conflicts',
+          where: "entity_type IN ('loans','loan_repayments','loan_repayment_reminders')",
+        );
+      }
+    });
   }
 
   Future<void> _seed(sql.Database database) async {
@@ -383,12 +388,7 @@ class KoinlyDatabase {
               [account.id],
             )) ??
             0;
-        final loanReferences = sql.Sqflite.firstIntValue(await txn.rawQuery(
-              'SELECT COUNT(*) FROM loans WHERE account_id = ?',
-              [account.id],
-            )) ??
-            0;
-        if (transactionReferences == 0 && budgetReferences == 0 && loanReferences == 0) {
+        if (transactionReferences == 0 && budgetReferences == 0) {
           await txn.delete('accounts', where: 'id = ?', whereArgs: [account.id]);
           deletedIds.add(account.id);
         }
@@ -417,10 +417,7 @@ class KoinlyDatabase {
           SELECT
             (SELECT COUNT(*) FROM transactions) +
             (SELECT COUNT(*) FROM budgets) +
-            (SELECT COUNT(*) FROM budget_accounts) +
-            (SELECT COUNT(*) FROM loans) +
-            (SELECT COUNT(*) FROM loan_repayments) +
-            (SELECT COUNT(*) FROM loan_repayment_reminders)
+            (SELECT COUNT(*) FROM budget_accounts)
           ''',
         )) ??
         0;
@@ -445,7 +442,7 @@ class KoinlyDatabase {
   Future<void> deleteCategory(String id) async => (await db).delete('categories', where: 'id = ?', whereArgs: [id]);
 
   Future<List<MoneyTransaction>> transactions() async {
-    final maps = await (await db).query('transactions', where: 'loan_id IS NULL', orderBy: 'created_on DESC, updated_on DESC');
+    final maps = await (await db).query('transactions', orderBy: 'created_on DESC, updated_on DESC');
     return maps.map(MoneyTransaction.fromMap).toList();
   }
 
@@ -549,186 +546,10 @@ class KoinlyDatabase {
     });
   }
 
-  Future<List<Loan>> loans() async {
-    final maps = await (await db).query('loans', orderBy: 'status ASC, loan_date DESC');
-    return maps.map(Loan.fromMap).toList();
-  }
-
-  Future<List<LoanRepayment>> repayments(String loanId) async {
-    final maps = await (await db).query('loan_repayments', where: 'loan_id = ?', whereArgs: [loanId], orderBy: 'paid_on DESC');
-    return maps.map(LoanRepayment.fromMap).toList();
-  }
-
-  Future<List<LoanRepaymentReminder>> loanRepaymentReminders({String? loanId}) async {
-    final database = await db;
-    final maps = loanId == null
-        ? await database.query('loan_repayment_reminders', orderBy: 'is_paid ASC, due_date ASC')
-        : await database.query('loan_repayment_reminders', where: 'loan_id = ?', whereArgs: [loanId], orderBy: 'is_paid ASC, due_date ASC');
-    return maps.map(LoanRepaymentReminder.fromMap).toList();
-  }
-
-  Future<void> replacePendingLoanRepaymentReminders(String loanId, List<LoanRepaymentReminder> reminders) async {
-    final database = await db;
-    await database.transaction((txn) async {
-      await txn.delete('loan_repayment_reminders', where: 'loan_id = ? AND is_paid = 0', whereArgs: [loanId]);
-      for (final reminder in reminders) {
-        await txn.insert('loan_repayment_reminders', reminder.toMap(), conflictAlgorithm: sql.ConflictAlgorithm.replace);
-      }
-    });
-  }
-
-  Future<void> deleteLoanRepaymentReminder(String id) async {
-    await (await db).delete('loan_repayment_reminders', where: 'id = ?', whereArgs: [id]);
-  }
-
-  Future<void> markLoanRepaymentReminderPaid(Loan loan, LoanRepaymentReminder reminder, String accountId) async {
-    if (reminder.isPaid) return;
-    final normalizedAmount = math.min(loan.remainingAmount, reminder.amount);
-    if (normalizedAmount <= 0) return;
-    final repayment = LoanRepayment(
-      id: _uuid.v4(),
-      loanId: loan.id,
-      accountId: accountId,
-      amount: normalizedAmount,
-      paidOn: DateTime.now(),
-      notes: reminder.notes,
-      createdOn: DateTime.now(),
-    );
-    final newRepaid = math.min(loan.amount, loan.repaidAmount + repayment.amount);
-    final updated = loan.copyWith(
-      repaidAmount: newRepaid,
-      status: newRepaid >= loan.amount ? LoanStatus.completed : LoanStatus.open,
-      updatedOn: DateTime.now(),
-    );
-    final database = await db;
-    await database.transaction((txn) async {
-      await txn.insert('loan_repayments', repayment.toMap());
-      await txn.update('loans', updated.toMap(), where: 'id = ?', whereArgs: [loan.id]);
-      await _applyLoanRepayment(txn, loan, repayment, 1);
-      await txn.update(
-        'loan_repayment_reminders',
-        reminder.copyWith(isPaid: true, paidOn: DateTime.now(), updatedOn: DateTime.now()).toMap(),
-        where: 'id = ?',
-        whereArgs: [reminder.id],
-      );
-    });
-  }
-
-  Future<void> _applyLoanPrincipal(sql.Transaction txn, Loan loan, int direction) async {
-    if (loan.accountId.isEmpty) return;
-    final delta = loan.type == LoanType.taken ? loan.amount : -loan.amount;
-    await txn.rawUpdate(
-      'UPDATE accounts SET amount = amount + ?, updated_on = ? WHERE id = ?',
-      [delta * direction, dateToDb(DateTime.now()), loan.accountId],
-    );
-  }
-
-  Future<void> _applyLoanRepayment(sql.Transaction txn, Loan loan, LoanRepayment repayment, int direction) async {
-    final accountId = repayment.accountId.isNotEmpty ? repayment.accountId : loan.accountId;
-    if (accountId.isEmpty) return;
-    final delta = loan.type == LoanType.given ? repayment.amount : -repayment.amount;
-    await txn.rawUpdate(
-      'UPDATE accounts SET amount = amount + ?, updated_on = ? WHERE id = ?',
-      [delta * direction, dateToDb(DateTime.now()), accountId],
-    );
-  }
-
-  Future<void> addLoan(Loan loan) async {
-    final database = await db;
-    await database.transaction((txn) async {
-      await txn.insert('loans', loan.toMap(), conflictAlgorithm: sql.ConflictAlgorithm.replace);
-      await _applyLoanPrincipal(txn, loan, 1);
-    });
-  }
-
-  Future<void> updateLoan(Loan updated) async {
-    final database = await db;
-    final rows = await database.query('loans', where: 'id = ?', whereArgs: [updated.id], limit: 1);
-    if (rows.isEmpty) {
-      await addLoan(updated);
-      return;
-    }
-    final old = Loan.fromMap(rows.first);
-    final repaymentRows = await database.query('loan_repayments', where: 'loan_id = ?', whereArgs: [updated.id]);
-    final repayments = repaymentRows.map(LoanRepayment.fromMap).toList();
-    await database.transaction((txn) async {
-      for (final repayment in repayments) {
-        await _applyLoanRepayment(txn, old, repayment, -1);
-      }
-      await _applyLoanPrincipal(txn, old, -1);
-      await txn.update('loans', updated.toMap(), where: 'id = ?', whereArgs: [updated.id]);
-      await _applyLoanPrincipal(txn, updated, 1);
-      for (final repayment in repayments) {
-        await _applyLoanRepayment(txn, updated, repayment, 1);
-      }
-      await txn.delete('transactions', where: 'loan_id = ?', whereArgs: [updated.id]);
-    });
-  }
-
-  Future<void> deleteLoan(String id) async {
-    final database = await db;
-    final loanRows = await database.query('loans', where: 'id = ?', whereArgs: [id], limit: 1);
-    if (loanRows.isEmpty) return;
-    final loan = Loan.fromMap(loanRows.first);
-    final repaymentRows = await database.query('loan_repayments', where: 'loan_id = ?', whereArgs: [id]);
-    final repayments = repaymentRows.map(LoanRepayment.fromMap).toList();
-    await database.transaction((txn) async {
-      for (final repayment in repayments) {
-        await _applyLoanRepayment(txn, loan, repayment, -1);
-      }
-      await _applyLoanPrincipal(txn, loan, -1);
-      await txn.delete('transactions', where: 'loan_id = ?', whereArgs: [id]);
-      await txn.delete('loan_repayments', where: 'loan_id = ?', whereArgs: [id]);
-      await txn.delete('loan_repayment_reminders', where: 'loan_id = ?', whereArgs: [id]);
-      await txn.delete('loans', where: 'id = ?', whereArgs: [id]);
-    });
-  }
-
-  Future<void> addRepayment(Loan loan, LoanRepayment repayment, String accountId) async {
-    final normalized = LoanRepayment(
-      id: repayment.id,
-      loanId: repayment.loanId,
-      accountId: accountId,
-      amount: repayment.amount,
-      paidOn: repayment.paidOn,
-      notes: repayment.notes,
-      createdOn: repayment.createdOn,
-    );
-    final newRepaid = math.min(loan.amount, loan.repaidAmount + normalized.amount);
-    final updated = loan.copyWith(
-      repaidAmount: newRepaid,
-      status: newRepaid >= loan.amount ? LoanStatus.completed : LoanStatus.open,
-      updatedOn: DateTime.now(),
-    );
-    final database = await db;
-    await database.transaction((txn) async {
-      await txn.insert('loan_repayments', normalized.toMap());
-      await txn.update('loans', updated.toMap(), where: 'id = ?', whereArgs: [loan.id]);
-      await _applyLoanRepayment(txn, loan, normalized, 1);
-      await txn.delete('transactions', where: 'repayment_id = ?', whereArgs: [normalized.id]);
-    });
-  }
-
-  Future<void> deleteRepayment(String repaymentId) async {
-    final database = await db;
-    final rows = await database.query('loan_repayments', where: 'id = ?', whereArgs: [repaymentId], limit: 1);
-    if (rows.isEmpty) return;
-    final repayment = LoanRepayment.fromMap(rows.first);
-    final loanRows = await database.query('loans', where: 'id = ?', whereArgs: [repayment.loanId], limit: 1);
-    if (loanRows.isEmpty) return;
-    final loan = Loan.fromMap(loanRows.first);
-    final repaid = math.max<double>(0.0, loan.repaidAmount - repayment.amount);
-    await database.transaction((txn) async {
-      await _applyLoanRepayment(txn, loan, repayment, -1);
-      await txn.update('loans', loan.copyWith(repaidAmount: repaid, status: repaid >= loan.amount ? LoanStatus.completed : LoanStatus.open, updatedOn: DateTime.now()).toMap(), where: 'id = ?', whereArgs: [loan.id]);
-      await txn.delete('transactions', where: 'repayment_id = ?', whereArgs: [repaymentId]);
-      await txn.delete('loan_repayments', where: 'id = ?', whereArgs: [repaymentId]);
-    });
-  }
 
   Future<Map<String, dynamic>> exportAll() async {
     final database = await db;
-    final tables = ['accounts', 'categories', 'transactions', 'budgets', 'budget_accounts', 'budget_categories', 'loans', 'loan_repayments', 'loan_repayment_reminders'];
+    final tables = ['accounts', 'categories', 'transactions', 'budgets', 'budget_accounts', 'budget_categories'];
     final data = <String, dynamic>{};
     for (final table in tables) {
       data[table] = await database.query(table);
@@ -738,7 +559,7 @@ class KoinlyDatabase {
 
   Future<void> importAll(Map<String, dynamic> data) async {
     final database = await db;
-    final tables = ['loan_repayment_reminders', 'loan_repayments', 'loans', 'budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
+    final tables = ['budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
     await database.transaction((txn) async {
       for (final table in tables) {
         await txn.delete(table);
@@ -746,16 +567,21 @@ class KoinlyDatabase {
       for (final table in tables.reversed) {
         final rows = (data[table] as List? ?? []).cast<Map>();
         for (final row in rows) {
-          await txn.insert(table, row.cast<String, Object?>(), conflictAlgorithm: sql.ConflictAlgorithm.replace);
+          final normalized = Map<String, Object?>.from(row);
+          if (table == 'transactions') {
+            final legacyLoanId = normalized.remove('loan_id')?.toString() ?? '';
+            normalized.remove('repayment_id');
+            if (legacyLoanId.isNotEmpty) continue;
+          }
+          await txn.insert(table, normalized, conflictAlgorithm: sql.ConflictAlgorithm.replace);
         }
       }
     });
-    await _migrateLoanAccountSelection(database);
   }
 
   Future<bool> hasLocalUserActivity() async {
     final database = await db;
-    for (final table in ['transactions', 'budgets', 'loans', 'loan_repayments', 'loan_repayment_reminders']) {
+    for (final table in ['transactions', 'budgets']) {
       final rows = await database.query(table, columns: ['COUNT(*) AS count']);
       if ((rows.first['count'] as num? ?? 0).toInt() > 0) return true;
     }
@@ -764,7 +590,7 @@ class KoinlyDatabase {
 
   Future<void> clearFinanceDataForRemoteLogin() async {
     final database = await db;
-    final tables = ['loan_repayment_reminders', 'loan_repayments', 'loans', 'budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
+    final tables = ['budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
     await database.transaction((txn) async {
       for (final table in tables) {
         await txn.delete(table);
@@ -782,9 +608,6 @@ class KoinlyDatabase {
     'budgets',
     'budget_accounts',
     'budget_categories',
-    'loans',
-    'loan_repayments',
-    'loan_repayment_reminders',
   ];
 
   Future<String> readSyncState(String key, [String fallback = '']) async {
@@ -985,10 +808,6 @@ class KoinlyDatabase {
             await txn.delete('budget_accounts', where: 'budget_id = ?', whereArgs: [entityId]);
             await txn.delete('budget_categories', where: 'budget_id = ?', whereArgs: [entityId]);
           }
-          if (entityType == 'loans') {
-            await txn.delete('loan_repayments', where: 'loan_id = ?', whereArgs: [entityId]);
-            await txn.delete('loan_repayment_reminders', where: 'loan_id = ?', whereArgs: [entityId]);
-          }
           await txn.delete(entityType, where: _whereForEntity(entityType), whereArgs: _whereArgsForEntity(entityType, entityId));
         } else {
           final payload = (change['payload'] as Map? ?? {}).cast<String, Object?>();
@@ -1065,7 +884,7 @@ class ExportService {
         DateFormat('HH:mm').format(tx.createdOn),
         tx.displayType,
         category?.name ?? '',
-        tx.isLoanMovement ? 'loan' : (category == null ? '' : enumName(category.type)),
+        category == null ? '' : enumName(category.type),
         from?.name ?? '',
         from == null ? '' : enumName(from.type),
         to?.name ?? '',
@@ -1383,16 +1202,12 @@ class AppController extends ChangeNotifier {
   bool onboardingCompleted = false;
   bool starterAccountsSkipped = false;
   int desktopSetupVersionCompleted = 0;
-  bool authenticated = false;
   int tabIndex = 0;
-  LoanType activeLoanType = LoanType.given;
 
   List<Account> accounts = [];
   List<Category> categories = [];
   List<MoneyTransaction> transactions = [];
   List<Budget> budgets = [];
-  List<Loan> loans = [];
-  List<LoanRepaymentReminder> loanRepaymentReminders = [];
   SavingsSuggestionProfile savingsSuggestionProfile = SavingsSuggestionProfile.empty;
   List<String> savedSavingsIdeas = [];
   List<String> plannedSavingsIdeas = [];
@@ -1400,16 +1215,12 @@ class AppController extends ChangeNotifier {
   List<String> dismissedFinancialHealthSummaryKeys = [];
   Map<String, Account> _accountsById = {};
   Map<String, Category> _categoriesById = {};
-  Map<String, Loan> _loansById = {};
-  Map<String, List<LoanRepaymentReminder>> _loanRemindersByLoanId = {};
   Map<CategoryType, Set<String>> _categoryIdsByType = {
     CategoryType.income: <String>{},
     CategoryType.expense: <String>{},
   };
   List<Account> _operatingAccounts = [];
   List<Account> _savingAccounts = [];
-  List<LoanRepaymentReminder> _overdueLoanReminders = [];
-  List<LoanRepaymentReminder> _dueTodayLoanReminders = [];
   double _operatingAccountBalance = 0;
   double _savingAccountBalance = 0;
   double _totalAccountBalance = 0;
@@ -1431,11 +1242,12 @@ class AppController extends ChangeNotifier {
   String? defaultIncomeCategoryId;
   bool compactHomeSummary = false;
   bool reducedMotion = kIsDesktopApp;
-  bool appLockEnabled = false;
   bool reminderEnabled = false;
   TimeOfDay reminderTime = const TimeOfDay(hour: 21, minute: 0);
   bool cloudSyncEnabled = false;
   SyncDatabaseProvider syncDatabaseProvider = SyncDatabaseProvider.mongoDb;
+  bool useCustomCloudSync = false;
+  String customCloudSyncApiBaseUrl = '';
   String cloudSyncApiBaseUrl = CloudSyncService.configuredApiBaseUrl;
   String cloudSyncId = '';
   String cloudSyncPin = '';
@@ -1490,20 +1302,9 @@ class AppController extends ChangeNotifier {
     return desktopSetupVersionCompleted >= kRequiredDesktopSetupVersion;
   }
 
-  Future<void> unlockApp() async {
-    authenticated = await authenticate();
-    notifyListeners();
-  }
-
   void selectTabIndex(int index) {
     if (tabIndex == index) return;
     tabIndex = index;
-    notifyListeners();
-  }
-
-  void selectLoanTab(LoanType type) {
-    activeLoanType = type;
-    tabIndex = 2;
     notifyListeners();
   }
 
@@ -1512,11 +1313,6 @@ class AppController extends ChangeNotifier {
     await _loadPreferences();
     await reload();
     loading = false;
-    if (appLockEnabled) {
-      authenticated = await authenticate();
-    } else {
-      authenticated = true;
-    }
     notifyListeners();
     try {
       await FirebaseAnalytics.instance.logAppOpen();
@@ -1558,7 +1354,6 @@ class AppController extends ChangeNotifier {
     if (defaultIncomeCategoryId?.isEmpty == true) defaultIncomeCategoryId = null;
     compactHomeSummary = await prefs.getBool('compactHomeSummary', false);
     reducedMotion = await prefs.getBool('reducedMotion', kIsDesktopApp);
-    appLockEnabled = await prefs.getBool('appLockEnabled', false);
     reminderEnabled = await prefs.getBool('reminderEnabled', false);
     final hour = await prefs.getInt('reminderHour', 21);
     final minute = await prefs.getInt('reminderMinute', 0);
@@ -1571,8 +1366,13 @@ class AppController extends ChangeNotifier {
       await prefs.setEnum('syncDatabaseProvider', SyncDatabaseProvider.mongoDb);
       await prefs.setBool('cloudSyncEnabled', false);
     }
-    final savedCloudSyncApiBaseUrl = await prefs.getString('cloudSyncApiBaseUrl', '');
-    cloudSyncApiBaseUrl = CloudSyncService.resolveApiBaseUrl(savedCloudSyncApiBaseUrl);
+    useCustomCloudSync = await prefs.getBool('useCustomCloudSync', false);
+    customCloudSyncApiBaseUrl = CloudSyncService.normalizeApiBaseUrl(await prefs.getString('customCloudSyncApiBaseUrl', ''));
+    if (useCustomCloudSync && customCloudSyncApiBaseUrl.isEmpty) {
+      useCustomCloudSync = false;
+      await prefs.setBool('useCustomCloudSync', false);
+    }
+    cloudSyncApiBaseUrl = useCustomCloudSync ? customCloudSyncApiBaseUrl : CloudSyncService.configuredApiBaseUrl;
     cloudSyncId = await prefs.getString('cloudSyncId', '');
     cloudSyncPin = await secureCredentials.readCloudSyncPin();
     final legacyPin = await prefs.getString('cloudSyncPin', '');
@@ -1700,7 +1500,7 @@ class AppController extends ChangeNotifier {
           body: 'This is okay for offline-first use. Add an account when you want to start tracking balances.',
         ));
       }
-      if (categories.where((category) => !category.isLoanSystemCategory).isEmpty) {
+      if (categories.isEmpty) {
         items.add(const DataHealthItem(
           severity: DataHealthSeverity.warning,
           title: 'No visible categories',
@@ -1755,7 +1555,7 @@ class AppController extends ChangeNotifier {
         checkedAt: DateTime.now(),
         items: List.unmodifiable(items),
         accountCount: accounts.length,
-        categoryCount: categories.where((category) => !category.isLoanSystemCategory).length,
+        categoryCount: categories.length,
         transactionCount: transactions.length,
         budgetCount: budgets.length,
         pendingSyncOperations: pendingSyncOperations,
@@ -1867,7 +1667,6 @@ class AppController extends ChangeNotifier {
         'defaultExpenseCategoryId': defaultExpenseCategoryId ?? '',
         'defaultIncomeCategoryId': defaultIncomeCategoryId ?? '',
         'compactHomeSummary': compactHomeSummary,
-        'appLockEnabled': appLockEnabled,
         'reminderEnabled': reminderEnabled,
         'reminderHour': reminderTime.hour,
         'reminderMinute': reminderTime.minute,
@@ -1888,6 +1687,8 @@ class AppController extends ChangeNotifier {
       'authoritativeCloudUploadPending',
       'cloudSyncLastAt',
       'cloudSyncApiBaseUrl',
+      'useCustomCloudSync',
+      'customCloudSyncApiBaseUrl',
       'cloudSyncId',
       'cloudSyncPin',
       'syncAccountEmail',
@@ -2405,6 +2206,31 @@ class AppController extends ChangeNotifier {
     await performMultiDeviceSync(pushLocalChanges: false);
   }
 
+  Future<void> configureAccountSyncEndpoint({required bool useCustom, required String customApiBaseUrl}) async {
+    final nextApiBaseUrl = useCustom
+        ? CloudSyncService.validateApiBaseUrl(customApiBaseUrl)
+        : CloudSyncService.configuredApiBaseUrl;
+    if (nextApiBaseUrl.isEmpty) {
+      throw StateError('Default cloud sync is not configured in this build.');
+    }
+    if (useCustom) {
+      await KoinlySyncApi(baseUrl: nextApiBaseUrl).validateBackend();
+    }
+    final endpointChanged = CloudSyncService.normalizeApiBaseUrl(cloudSyncApiBaseUrl) != nextApiBaseUrl;
+    if (endpointChanged && cloudSyncEnabled) {
+      await logoutSyncAccount();
+    }
+    useCustomCloudSync = useCustom;
+    if (useCustom) customCloudSyncApiBaseUrl = nextApiBaseUrl;
+    cloudSyncApiBaseUrl = nextApiBaseUrl;
+    cloudSyncError = null;
+    cloudSyncErrorCode = null;
+    await prefs.setBool('useCustomCloudSync', useCustomCloudSync);
+    await prefs.setString('customCloudSyncApiBaseUrl', customCloudSyncApiBaseUrl);
+    await prefs.setString('cloudSyncApiBaseUrl', cloudSyncApiBaseUrl);
+    notifyListeners();
+  }
+
   Future<void> registerSyncAccount({required String email, required String password, required String registrationKey}) async {
     await _authenticateSyncAccount(register: true, email: email, password: password, registrationKey: registrationKey);
   }
@@ -2425,9 +2251,8 @@ class AppController extends ChangeNotifier {
     syncStatus = register ? 'Creating account...' : 'Signing in...';
     notifyListeners();
     try {
-      cloudSyncApiBaseUrl = CloudSyncService.configuredApiBaseUrl;
       if (cloudSyncApiBaseUrl.isEmpty) {
-        throw StateError('Online sync backend is not configured in this build. Set KOINLY_SYNC_API_BASE_URL in GitHub Actions and rebuild the app.');
+        throw StateError('Choose a configured cloud sync service first.');
       }
       final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
       final session = register
@@ -2888,12 +2713,10 @@ class AppController extends ChangeNotifier {
     categories = await database.categories();
     transactions = await database.transactions();
     budgets = await database.budgets();
-    loans = await database.loans();
-    loanRepaymentReminders = await database.loanRepaymentReminders();
     _rebuildLookupCaches();
     defaultAccountId ??= accounts.where((a) => a.type != AccountType.savings).firstOrNull?.id ?? accounts.firstOrNull?.id;
-    defaultExpenseCategoryId ??= categories.where((c) => c.type == CategoryType.expense && !c.isLoanSystemCategory).firstOrNull?.id;
-    defaultIncomeCategoryId ??= categories.where((c) => c.type == CategoryType.income && !c.isLoanSystemCategory).firstOrNull?.id;
+    defaultExpenseCategoryId ??= categories.where((c) => c.type == CategoryType.expense).firstOrNull?.id;
+    defaultIncomeCategoryId ??= categories.where((c) => c.type == CategoryType.income).firstOrNull?.id;
     notifyListeners();
     if (queueSync) queueCloudSync();
   }
@@ -2901,7 +2724,6 @@ class AppController extends ChangeNotifier {
   void _rebuildLookupCaches() {
     _accountsById = {for (final account in accounts) account.id: account};
     _categoriesById = {for (final category in categories) category.id: category};
-    _loansById = {for (final loan in loans) loan.id: loan};
     _operatingAccounts = accounts.where((a) => a.type != AccountType.savings).toList(growable: false);
     _savingAccounts = accounts.where((a) => a.type == AccountType.savings).toList(growable: false);
     _operatingAccountBalance = _operatingAccounts.fold<double>(0, (sum, account) => sum + account.amount);
@@ -2911,15 +2733,7 @@ class AppController extends ChangeNotifier {
       CategoryType.income: categories.where((c) => c.type == CategoryType.income).map((c) => c.id).toSet(),
       CategoryType.expense: categories.where((c) => c.type == CategoryType.expense).map((c) => c.id).toSet(),
     };
-    final remindersByLoan = <String, List<LoanRepaymentReminder>>{};
-    for (final reminder in loanRepaymentReminders) {
-      (remindersByLoan[reminder.loanId] ??= <LoanRepaymentReminder>[]).add(reminder);
-    }
-    _loanRemindersByLoanId = {
-      for (final entry in remindersByLoan.entries) entry.key: List<LoanRepaymentReminder>.unmodifiable(entry.value),
-    };
-    _overdueLoanReminders = loanRepaymentReminders.where((r) => r.isOverdue).toList(growable: false);
-    _dueTodayLoanReminders = loanRepaymentReminders.where((r) => r.isDueToday).toList(growable: false);
+
   }
 
   Future<void> skipStarterAccounts() async {
@@ -2935,21 +2749,6 @@ class AppController extends ChangeNotifier {
       await prefs.setString('defaultAccountId', defaultAccountId ?? '');
     }
     await reload(queueSync: deletedStarterAccountIds.isNotEmpty);
-  }
-
-  Future<bool> authenticate() async {
-    final auth = LocalAuthentication();
-    try {
-      final supported = await auth.isDeviceSupported();
-      final canCheck = await auth.canCheckBiometrics;
-      if (!supported && !canCheck) return true;
-      return await auth.authenticate(
-        localizedReason: 'Verify your identity to continue',
-        options: const AuthenticationOptions(biometricOnly: false, stickyAuth: true),
-      );
-    } catch (_) {
-      return true;
-    }
   }
 
   ThemeMode get themeMode {
@@ -2978,10 +2777,6 @@ class AppController extends ChangeNotifier {
 
   Account? accountOf(String id) => _accountsById[id];
   Category? categoryOf(String id) => _categoriesById[id];
-  Loan? loanOf(String id) => _loansById[id];
-  List<LoanRepaymentReminder> loanRemindersFor(String loanId) => _loanRemindersByLoanId[loanId] ?? const [];
-  List<LoanRepaymentReminder> get overdueLoanReminders => _overdueLoanReminders;
-  List<LoanRepaymentReminder> get dueTodayLoanReminders => _dueTodayLoanReminders;
 
   List<Account> get operatingAccounts => _operatingAccounts;
   List<Account> get savingAccounts => _savingAccounts;
@@ -3101,10 +2896,10 @@ class AppController extends ChangeNotifier {
       if (filterAccountIds.isNotEmpty && !filterAccountIds.contains(tx.fromAccountId) && !(tx.toAccountId != null && filterAccountIds.contains(tx.toAccountId))) return false;
       final isReportableCategoryTransaction = tx.countsAsIncome || tx.countsAsExpense;
       if (filterCategoryIds.isNotEmpty && (!isReportableCategoryTransaction || !filterCategoryIds.contains(tx.categoryId))) return false;
-      if (filterTypes.isNotEmpty && (tx.isLoanMovement || !filterTypes.contains(tx.type))) return false;
+      if (filterTypes.isNotEmpty && !filterTypes.contains(tx.type)) return false;
       if (categoryId != null && (!isReportableCategoryTransaction || tx.categoryId != categoryId)) return false;
       if (accountId != null && tx.fromAccountId != accountId && tx.toAccountId != accountId) return false;
-      if (types != null && (tx.isLoanMovement || !types.contains(tx.type))) return false;
+      if (types != null && !types.contains(tx.type)) return false;
       return true;
     }).toList();
   }
@@ -3215,13 +3010,6 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> setAppLock(bool value) async {
-    appLockEnabled = value;
-    await prefs.setBool('appLockEnabled', value);
-    notifyListeners();
-    await queuePreferenceSync();
-  }
-
   Future<void> setReminder(bool enabled, TimeOfDay time) async {
     reminderEnabled = enabled;
     reminderTime = time;
@@ -3296,6 +3084,17 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> saveBudget(Budget budget) async {
+    final previous = budgets.where((item) => item.id == budget.id).firstOrNull;
+    if (previous != null) {
+      final removedAccountIds = previous.accountIds.toSet().difference(budget.accountIds.toSet());
+      final removedCategoryIds = previous.categoryIds.toSet().difference(budget.categoryIds.toSet());
+      for (final accountId in removedAccountIds) {
+        await database.enqueueDelete('budget_accounts', '${budget.id}:$accountId');
+      }
+      for (final categoryId in removedCategoryIds) {
+        await database.enqueueDelete('budget_categories', '${budget.id}:$categoryId');
+      }
+    }
     await database.upsertBudget(budget);
     await database.enqueueTableRow('budgets', budget.id);
     await database.enqueueRowsForTable('budget_accounts', budgetId: budget.id);
@@ -3304,82 +3103,21 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> deleteBudget(String id) async {
+    final previous = budgets.where((item) => item.id == id).firstOrNull;
+    if (previous != null) {
+      for (final accountId in previous.accountIds) {
+        await database.enqueueDelete('budget_accounts', '$id:$accountId');
+      }
+      for (final categoryId in previous.categoryIds) {
+        await database.enqueueDelete('budget_categories', '$id:$categoryId');
+      }
+    }
     await database.enqueueDelete('budgets', id);
     await database.deleteBudget(id);
     await reload(queueSync: true);
   }
 
-  Future<void> addLoan(Loan loan) async {
-    await database.addLoan(loan);
-    await database.enqueueTableRow('loans', loan.id);
-    await database.enqueueRowsForTable('accounts');
-    await reload(queueSync: true);
-  }
 
-  Future<void> updateLoan(Loan loan) async {
-    await database.updateLoan(loan);
-    await database.enqueueTableRow('loans', loan.id);
-    await database.enqueueRowsForTable('accounts');
-    await reload(queueSync: true);
-  }
-
-  Future<void> deleteLoan(String id) async {
-    for (final reminder in loanRemindersFor(id)) {
-      await ReminderService.cancelLoanRepaymentReminder(reminder.id);
-    }
-    await database.enqueueDelete('loans', id);
-    await database.deleteLoan(id);
-    await database.enqueueRowsForTable('accounts');
-    await reload(queueSync: true);
-  }
-
-  Future<void> addRepayment(Loan loan, LoanRepayment repayment, String accountId) async {
-    await database.addRepayment(loan, repayment, accountId);
-    await database.enqueueTableRow('loan_repayments', repayment.id);
-    await database.enqueueTableRow('loans', loan.id);
-    await database.enqueueRowsForTable('accounts');
-    await reload(queueSync: true);
-  }
-
-  Future<void> deleteRepayment(String id) async {
-    await database.enqueueDelete('loan_repayments', id);
-    await database.deleteRepayment(id);
-    await database.enqueueRowsForTable('accounts');
-    await reload(queueSync: true);
-  }
-
-  Future<void> replaceLoanRepaymentReminders(String loanId, List<LoanRepaymentReminder> reminders) async {
-    for (final oldReminder in loanRemindersFor(loanId).where((r) => !r.isPaid)) {
-      await ReminderService.cancelLoanRepaymentReminder(oldReminder.id);
-    }
-    await database.replacePendingLoanRepaymentReminders(loanId, reminders);
-    for (final reminder in reminders) {
-      await database.enqueueTableRow('loan_repayment_reminders', reminder.id);
-    }
-    final loan = loanOf(loanId);
-    if (loan != null) {
-      for (final reminder in reminders) {
-        await ReminderService.scheduleLoanRepaymentReminder(loan: loan, reminder: reminder);
-      }
-    }
-    await reload(queueSync: true);
-  }
-
-  Future<void> deleteLoanRepaymentReminder(String id) async {
-    await ReminderService.cancelLoanRepaymentReminder(id);
-    await database.enqueueDelete('loan_repayment_reminders', id);
-    await database.deleteLoanRepaymentReminder(id);
-    await reload(queueSync: true);
-  }
-
-  Future<void> markLoanRepaymentReminderPaid(Loan loan, LoanRepaymentReminder reminder, String accountId) async {
-    await database.markLoanRepaymentReminderPaid(loan, reminder, accountId);
-    await database.enqueueTableRow('loan_repayment_reminders', reminder.id);
-    await database.enqueueTableRow('loans', loan.id);
-    await database.enqueueRowsForTable('accounts');
-    await ReminderService.cancelLoanRepaymentReminder(reminder.id);
-    await reload(queueSync: true);
-  }
 }
 
 String savingsSuggestionDayKey([DateTime? date]) {
@@ -3740,11 +3478,10 @@ class StartupGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final gate = context.select<AppController, ({bool loading, bool authenticated, bool setupCompleted})>(
-      (state) => (loading: state.loading, authenticated: state.authenticated, setupCompleted: state.setupCompletedForCurrentPlatform),
+    final gate = context.select<AppController, ({bool loading, bool setupCompleted})>(
+      (state) => (loading: state.loading, setupCompleted: state.setupCompletedForCurrentPlatform),
     );
     if (gate.loading) return const SplashScreen();
-    if (!gate.authenticated) return const LockScreen();
     if (!gate.setupCompleted) return const OnboardingScreen();
     return const FinancialHealthReviewGate(child: MainShell());
   }
@@ -3822,18 +3559,10 @@ bool financialHealthSummaryHasActivity(AppController state, FinancialHealthRevie
       summary.expense > 0 ||
       summary.savingsIn > 0 ||
       summary.savingsOut > 0 ||
-      (kLoansFeatureEnabled && summary.loansGiven > 0) ||
-      (kLoansFeatureEnabled && summary.loansTaken > 0) ||
-      (kLoansFeatureEnabled && summary.loanRepaymentPaid > 0) ||
-      (kLoansFeatureEnabled && summary.loanRepaymentReceived > 0) ||
       summary.billPaymentCount > 0 ||
       summary.billUnpaidCount > 0 ||
       summary.billUpcomingCount > 0 ||
       summary.billOverdueCount > 0 ||
-      (kLoansFeatureEnabled && summary.loanReminderCompletedCount > 0) ||
-      (kLoansFeatureEnabled && summary.loanReminderPendingCount > 0) ||
-      (kLoansFeatureEnabled && summary.loanReminderPartialCount > 0) ||
-      (kLoansFeatureEnabled && summary.loanReminderOverdueCount > 0) ||
       summary.budgetItems.isNotEmpty;
 }
 
@@ -3987,42 +3716,6 @@ class SplashScreen extends StatelessWidget {
   }
 }
 
-class LockScreen extends StatelessWidget {
-  const LockScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.read<AppController>();
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: ExpressiveCard(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.lock_rounded, size: 64),
-                  const SizedBox(height: 16),
-                  Text('Unlock Koinly', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
-                  const SizedBox(height: 8),
-                  Text('Verify your identity to continue', textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyLarge),
-                  const SizedBox(height: 24),
-                  FilledButton.icon(
-                    onPressed: state.unlockApp,
-                    icon: const Icon(Icons.fingerprint_rounded),
-                    label: const Text('Unlock'),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
 
@@ -4069,12 +3762,10 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final requestedTabIndex = context.select<AppController, int>((state) => state.tabIndex);
-    final activeLoanType = context.select<AppController, LoanType>((state) => state.activeLoanType);
     final state = context.read<AppController>();
     final pages = <Widget>[
       const HomeDashboardScreen(),
       const AnalysisScreen(),
-      if (kLoansFeatureEnabled) const LoansScreen(),
       const TransactionListScreen(),
       const CategoriesScreen(),
     ];
@@ -4085,21 +3776,14 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       });
     }
 
-    final Widget? actionButton = kLoansFeatureEnabled && tabIndex == kLoansTabIndex
+    final Widget? actionButton = tabIndex == kTransactionTabIndex
         ? FloatingActionButton.extended(
-            heroTag: 'loanAddFab',
-            onPressed: () => showLoanEditor(context, initialType: activeLoanType),
+            heroTag: 'transactionAddFab',
+            onPressed: () => showTransactionEditor(context),
             icon: const Icon(Icons.add_rounded),
-            label: const Text('Add loan'),
+            label: const Text('Add'),
           )
-        : tabIndex == kTransactionTabIndex
-            ? FloatingActionButton.extended(
-                heroTag: 'transactionAddFab',
-                onPressed: () => showTransactionEditor(context),
-                icon: const Icon(Icons.add_rounded),
-                label: const Text('Add'),
-              )
-            : null;
+        : null;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -4285,7 +3969,6 @@ class _FloatingDockNavigation extends StatelessWidget {
   static List<_DockDestination> get destinations => [
     const _DockDestination(label: 'Home', icon: Icons.home_outlined, activeIcon: Icons.home_rounded),
     const _DockDestination(label: 'Analysis', icon: Icons.insights_outlined, activeIcon: Icons.insights_rounded),
-    if (kLoansFeatureEnabled) const _DockDestination(label: 'Loans', icon: Icons.handshake_outlined, activeIcon: Icons.handshake_rounded),
     const _DockDestination(label: 'Transaction', icon: Icons.receipt_long_outlined, activeIcon: Icons.receipt_long_rounded),
     const _DockDestination(label: 'Categories', icon: Icons.category_outlined, activeIcon: Icons.category_rounded),
   ];
@@ -5792,43 +5475,6 @@ class HomeDashboardScreen extends StatelessWidget {
     ];
 
 
-    final overdueLoanSection = <Widget>[
-      if (kLoansFeatureEnabled && state.overdueLoanReminders.isNotEmpty) ...[
-        const SectionHeader('Loan alerts'),
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () {
-            final reminder = state.overdueLoanReminders.firstOrNull;
-            final loan = reminder == null ? null : state.loanOf(reminder.loanId);
-            if (loan != null) {
-              state.selectLoanTab(loan.type);
-            } else {
-              state.selectTabIndex(kLoansTabIndex);
-            }
-          },
-          child: ExpressiveCard(
-            color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF2A1719) : const Color(0xFFFFF0F0),
-            child: Row(
-              children: [
-                iconBubble(context, 'warning', '#FF5353', size: 50),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('${state.overdueLoanReminders.length} overdue loan repayment${state.overdueLoanReminders.length == 1 ? '' : 's'}', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
-                      const SizedBox(height: 4),
-                      Text('Open Loan Tracking to mark repayments as paid.', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700)),
-                    ],
-                  ),
-                ),
-                const Icon(Icons.chevron_right_rounded),
-              ],
-            ),
-          ),
-        ),
-      ],
-    ];
 
     final categorySection = <Widget>[
       SectionHeader('Category spending'),
@@ -5920,7 +5566,6 @@ class HomeDashboardScreen extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   balanceCard,
-                  ...overdueLoanSection,
                   ...startEmptySection,
                   ...accountsSection,
                   ...budgetSection,
@@ -5938,8 +5583,7 @@ class HomeDashboardScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       balanceCard,
-                      ...overdueLoanSection,
-                      ...startEmptySection,
+                          ...startEmptySection,
                       ...accountsSection,
                       ...budgetSection,
                     ],
@@ -8334,7 +7978,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
     final accountOptions = type == MoneyTransactionType.transfer ? state.accounts : regularAccountOptions;
     final fromAccount = state.accounts.where((a) => a.id == fromAccountId).firstOrNull;
     final toAccount = state.accounts.where((a) => a.id == toAccountId).firstOrNull;
-    final relevantCategories = state.categories.where((c) => c.type == (type == MoneyTransactionType.income ? CategoryType.income : CategoryType.expense) && !c.isLoanSystemCategory).toList();
+    final relevantCategories = state.categories.where((c) => c.type == (type == MoneyTransactionType.income ? CategoryType.income : CategoryType.expense)).toList();
     if (type == MoneyTransactionType.transfer) categoryId = '';
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
@@ -8356,7 +8000,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
                 type = v;
                 if (type == MoneyTransactionType.income || type == MoneyTransactionType.expense) {
                   final targetType = type == MoneyTransactionType.income ? CategoryType.income : CategoryType.expense;
-                  final newCategories = state.categories.where((c) => c.type == targetType && !c.isLoanSystemCategory).toList();
+                  final newCategories = state.categories.where((c) => c.type == targetType).toList();
                   categoryId = type == MoneyTransactionType.income
                       ? state.defaultIncomeCategoryId ?? newCategories.firstOrNull?.id
                       : state.defaultExpenseCategoryId ?? newCategories.firstOrNull?.id;
@@ -8474,8 +8118,6 @@ class _TransactionEditorState extends State<TransactionEditor> {
                   categoryId: type == MoneyTransactionType.transfer ? '' : (categoryId ?? ''),
                   fromAccountId: fromAccountId!,
                   toAccountId: type == MoneyTransactionType.transfer ? toAccountId : null,
-                  loanId: widget.transaction?.loanId,
-                  repaymentId: widget.transaction?.repaymentId,
                   createdOn: selectedDate,
                   updatedOn: DateTime.now(),
                 );
@@ -8858,10 +8500,6 @@ class MonthlyFinancialBreakdown {
     required this.expense,
     required this.savingsIn,
     required this.savingsOut,
-    required this.loansGiven,
-    required this.loansTaken,
-    required this.loanRepaymentPaid,
-    required this.loanRepaymentReceived,
     required this.billPaymentTotal,
     required this.billPaymentCount,
     required this.budgetLimit,
@@ -8873,10 +8511,6 @@ class MonthlyFinancialBreakdown {
   final double expense;
   final double savingsIn;
   final double savingsOut;
-  final double loansGiven;
-  final double loansTaken;
-  final double loanRepaymentPaid;
-  final double loanRepaymentReceived;
   final double billPaymentTotal;
   final int billPaymentCount;
   final double budgetLimit;
@@ -8901,19 +8535,11 @@ class FinancialHealthSummary {
     required this.savingsIn,
     required this.savingsOut,
     required this.currentSavingsBalance,
-    required this.loansGiven,
-    required this.loansTaken,
-    required this.loanRepaymentPaid,
-    required this.loanRepaymentReceived,
     required this.billPaymentTotal,
     required this.billPaymentCount,
     required this.billUnpaidCount,
     required this.billUpcomingCount,
     required this.billOverdueCount,
-    required this.loanReminderCompletedCount,
-    required this.loanReminderPendingCount,
-    required this.loanReminderPartialCount,
-    required this.loanReminderOverdueCount,
     required this.budgetItems,
     required this.budgetCounts,
     required this.monthlyBreakdowns,
@@ -8932,19 +8558,11 @@ class FinancialHealthSummary {
   final double savingsIn;
   final double savingsOut;
   final double currentSavingsBalance;
-  final double loansGiven;
-  final double loansTaken;
-  final double loanRepaymentPaid;
-  final double loanRepaymentReceived;
   final double billPaymentTotal;
   final int billPaymentCount;
   final int billUnpaidCount;
   final int billUpcomingCount;
   final int billOverdueCount;
-  final int loanReminderCompletedCount;
-  final int loanReminderPendingCount;
-  final int loanReminderPartialCount;
-  final int loanReminderOverdueCount;
   final List<BudgetHealthItem> budgetItems;
   final BudgetThresholdCounts budgetCounts;
   final List<MonthlyFinancialBreakdown> monthlyBreakdowns;
@@ -8967,10 +8585,6 @@ class FinancialHealthSummary {
     double expense = 0;
     double savingsIn = 0;
     double savingsOut = 0;
-    double loansGiven = 0;
-    double loansTaken = 0;
-    double loanRepaymentPaid = 0;
-    double loanRepaymentReceived = 0;
     double billPaymentTotal = 0;
     var billPaymentCount = 0;
 
@@ -8979,36 +8593,10 @@ class FinancialHealthSummary {
       if (tx.countsAsExpense) expense += tx.amount;
       if (isSavingsTransferIn(state, tx)) savingsIn += tx.amount;
       if (isSavingsTransferOut(state, tx)) savingsOut += tx.amount;
-      if (tx.isLoanPrincipal) {
-        if (tx.type == MoneyTransactionType.expense) loansGiven += tx.amount;
-        if (tx.type == MoneyTransactionType.income) loansTaken += tx.amount;
-      }
-      if (tx.isLoanRepayment) {
-        if (tx.type == MoneyTransactionType.expense) loanRepaymentPaid += tx.amount;
-        if (tx.type == MoneyTransactionType.income) loanRepaymentReceived += tx.amount;
-      }
       if (isRecurringPaymentTransaction(state, tx)) {
         billPaymentTotal += tx.amount;
         billPaymentCount++;
       }
-    }
-
-    var loanReminderCompleted = 0;
-    var loanReminderPending = 0;
-    var loanReminderPartial = 0;
-    var loanReminderOverdue = 0;
-    for (final reminder in state.loanRepaymentReminders) {
-      final paidInPeriod = reminder.isPaid && reminder.paidOn != null && isInsideFinancialPeriod(reminder.paidOn!, start, end);
-      final dueInPeriod = isInsideFinancialPeriod(reminder.dueDate, start, end);
-      if (!paidInPeriod && !dueInPeriod) continue;
-      final loan = state.loanOf(reminder.loanId);
-      if (paidInPeriod) loanReminderCompleted++;
-      if (!reminder.isPaid && reminder.isOverdue) {
-        loanReminderOverdue++;
-      } else if (!reminder.isPaid) {
-        loanReminderPending++;
-      }
-      if (loan != null && loan.repaidAmount > 0 && loan.remainingAmount > 0) loanReminderPartial++;
     }
 
     final budgetItems = budgetHealthItemsForPeriod(state, period, selectedDate);
@@ -9040,8 +8628,6 @@ class FinancialHealthSummary {
       income: income,
       expense: expense,
       savingsNet: savingsIn - savingsOut,
-      loansTaken: loansTaken,
-      loanRepaymentPaid: loanRepaymentPaid,
       overspentTotal: budgetItems.fold<double>(0, (sum, item) => sum + item.overspent),
     );
 
@@ -9057,19 +8643,11 @@ class FinancialHealthSummary {
       savingsIn: savingsIn,
       savingsOut: savingsOut,
       currentSavingsBalance: state.savingAccountBalance,
-      loansGiven: loansGiven,
-      loansTaken: loansTaken,
-      loanRepaymentPaid: loanRepaymentPaid,
-      loanRepaymentReceived: loanRepaymentReceived,
       billPaymentTotal: billPaymentTotal,
       billPaymentCount: billPaymentCount,
       billUnpaidCount: 0,
       billUpcomingCount: 0,
       billOverdueCount: 0,
-      loanReminderCompletedCount: loanReminderCompleted,
-      loanReminderPendingCount: loanReminderPending,
-      loanReminderPartialCount: loanReminderPartial,
-      loanReminderOverdueCount: loanReminderOverdue,
       budgetItems: budgetItems,
       budgetCounts: BudgetThresholdCounts(safe: safe, fifty: fifty, eighty: eighty, full: full, over: over),
       monthlyBreakdowns: monthlyBreakdowns,
@@ -9084,17 +8662,9 @@ class FinancialHealthSummary {
   required double income,
   required double expense,
   required double savingsNet,
-  required double loansTaken,
-  required double loanRepaymentPaid,
   required double overspentTotal,
 }) {
   final label = period == FinancialHealthPeriod.monthly ? 'month' : 'year';
-  if (loansTaken > loanRepaymentPaid && loansTaken > 0) {
-    return ('Increased Debt', 'Borrowed amount was higher than debt repayment in this $label.');
-  }
-  if (loanRepaymentPaid > loansTaken && loanRepaymentPaid > 0) {
-    return ('Reduced Debt', 'Debt repayment was higher than new borrowing in this $label.');
-  }
   if (overspentTotal > 0 || expense > income) {
     return ('Overspent', 'Expenses or budget usage were higher than the safe limit in this $label.');
   }
@@ -9144,10 +8714,6 @@ MonthlyFinancialBreakdown monthlyBreakdownFor(AppController state, DateTime mont
   double expense = 0;
   double savingsIn = 0;
   double savingsOut = 0;
-  double loansGiven = 0;
-  double loansTaken = 0;
-  double loanRepaymentPaid = 0;
-  double loanRepaymentReceived = 0;
   double billPaymentTotal = 0;
   var billPaymentCount = 0;
   for (final tx in txs) {
@@ -9155,14 +8721,6 @@ MonthlyFinancialBreakdown monthlyBreakdownFor(AppController state, DateTime mont
     if (tx.countsAsExpense) expense += tx.amount;
     if (isSavingsTransferIn(state, tx)) savingsIn += tx.amount;
     if (isSavingsTransferOut(state, tx)) savingsOut += tx.amount;
-    if (tx.isLoanPrincipal) {
-      if (tx.type == MoneyTransactionType.expense) loansGiven += tx.amount;
-      if (tx.type == MoneyTransactionType.income) loansTaken += tx.amount;
-    }
-    if (tx.isLoanRepayment) {
-      if (tx.type == MoneyTransactionType.expense) loanRepaymentPaid += tx.amount;
-      if (tx.type == MoneyTransactionType.income) loanRepaymentReceived += tx.amount;
-    }
     if (isRecurringPaymentTransaction(state, tx)) {
       billPaymentTotal += tx.amount;
       billPaymentCount++;
@@ -9175,10 +8733,6 @@ MonthlyFinancialBreakdown monthlyBreakdownFor(AppController state, DateTime mont
     expense: expense,
     savingsIn: savingsIn,
     savingsOut: savingsOut,
-    loansGiven: loansGiven,
-    loansTaken: loansTaken,
-    loanRepaymentPaid: loanRepaymentPaid,
-    loanRepaymentReceived: loanRepaymentReceived,
     billPaymentTotal: billPaymentTotal,
     billPaymentCount: billPaymentCount,
     budgetLimit: budgetItems.fold<double>(0, (sum, item) => sum + item.limit),
@@ -9265,12 +8819,6 @@ class FinancialHealthSummarySection extends StatelessWidget {
           HealthMetricData('Savings out', state.format(summary.savingsOut), Icons.output_rounded),
           HealthMetricData('Savings change', state.format(summary.savingsNet), Icons.trending_up_rounded),
           HealthMetricData('Current savings', state.format(summary.currentSavingsBalance), Icons.account_balance_rounded),
-          if (kLoansFeatureEnabled) ...[
-            HealthMetricData('Loans given', state.format(summary.loansGiven), Icons.north_east_rounded),
-            HealthMetricData('Loans taken', state.format(summary.loansTaken), Icons.south_west_rounded),
-            HealthMetricData('Repayment paid', state.format(summary.loanRepaymentPaid), Icons.payments_rounded),
-            HealthMetricData('Repayment received', state.format(summary.loanRepaymentReceived), Icons.call_received_rounded),
-          ],
           HealthMetricData('Recurring paid', state.format(summary.billPaymentTotal), Icons.receipt_long_rounded),
           HealthMetricData('Budget remaining', state.format(summary.budgetRemaining), Icons.pie_chart_rounded),
           HealthMetricData('Overspent', state.format(summary.overspentTotal), Icons.warning_rounded),
@@ -9432,20 +8980,6 @@ class FinancialHealthCharts extends StatelessWidget {
                 ],
               ),
             ),
-            if (kLoansFeatureEnabled)
-              SizedBox(
-                width: width,
-                child: HealthBarChartCard(
-                  title: 'Loan Activity',
-                  icon: Icons.account_balance_rounded,
-                  bars: [
-                    HealthBarData('Given', summary.loansGiven, state.format(summary.loansGiven), const Color(0xFFFF9AA2)),
-                    HealthBarData('Taken', summary.loansTaken, state.format(summary.loansTaken), const Color(0xFF8AB4FF)),
-                    HealthBarData('Paid', summary.loanRepaymentPaid, state.format(summary.loanRepaymentPaid), kSleekExpense),
-                    HealthBarData('Received', summary.loanRepaymentReceived, state.format(summary.loanRepaymentReceived), kSleekIncome),
-                  ],
-                ),
-              ),
             SizedBox(
               width: width,
               child: HealthBarChartCard(
@@ -9465,10 +8999,6 @@ class FinancialHealthCharts extends StatelessWidget {
                 icon: Icons.repeat_rounded,
                 bars: [
                   HealthBarData('Paid bills', summary.billPaymentTotal, state.format(summary.billPaymentTotal), kSleekAccent),
-                  if (kLoansFeatureEnabled) ...[
-                    HealthBarData('Loan reminders', (summary.loanReminderPendingCount + summary.loanReminderOverdueCount).toDouble(), '${summary.loanReminderPendingCount + summary.loanReminderOverdueCount}', kSleekWarning),
-                    HealthBarData('Overdue alerts', summary.loanReminderOverdueCount.toDouble(), '${summary.loanReminderOverdueCount}', kSleekExpense),
-                  ],
                 ],
               ),
             ),
@@ -9618,12 +9148,6 @@ class BillStatusCard extends StatelessWidget {
               HealthStatusPill(label: 'Bills unpaid ${summary.billUnpaidCount}', color: kSleekWarning),
               HealthStatusPill(label: 'Bills upcoming ${summary.billUpcomingCount}', color: const Color(0xFF8AB4FF)),
               HealthStatusPill(label: 'Bills overdue ${summary.billOverdueCount}', color: kSleekExpense),
-              if (kLoansFeatureEnabled) ...[
-                HealthStatusPill(label: 'Loan completed ${summary.loanReminderCompletedCount}', color: kSleekIncome),
-                HealthStatusPill(label: 'Loan pending ${summary.loanReminderPendingCount}', color: kSleekWarning),
-                HealthStatusPill(label: 'Loan partial ${summary.loanReminderPartialCount}', color: kSleekAccent),
-                HealthStatusPill(label: 'Loan overdue ${summary.loanReminderOverdueCount}', color: kSleekExpense),
-              ],
             ],
           ),
         ],
@@ -9792,9 +9316,7 @@ class MonthBreakdownTile extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            kLoansFeatureEnabled
-                ? 'Savings ${state.format(item.savingsNet)} • Loans ${state.format(item.loansGiven + item.loansTaken)} • Repayments ${state.format(item.loanRepaymentPaid + item.loanRepaymentReceived)} • Bills ${item.billPaymentCount} • Budget used ${state.format(item.budgetSpent)}'
-                : 'Savings ${state.format(item.savingsNet)} • Bills ${item.billPaymentCount} • Budget used ${state.format(item.budgetSpent)}',
+            'Savings ${state.format(item.savingsNet)} • Bills ${item.billPaymentCount} • Budget used ${state.format(item.budgetSpent)}',
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
@@ -10288,7 +9810,7 @@ class ManageCategoriesScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppController>();
-    final cats = state.categories.where((c) => c.type == type && !c.isLoanSystemCategory).toList()
+    final cats = state.categories.where((c) => c.type == type).toList()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     final title = type == CategoryType.expense ? 'Expense categories' : 'Income categories';
 
@@ -11166,897 +10688,6 @@ class _BudgetEditorState extends State<BudgetEditor> {
 }
 
 // -----------------------------------------------------------------------------
-// Loans
-// -----------------------------------------------------------------------------
-
-class LoansScreen extends StatefulWidget {
-  const LoansScreen({super.key});
-
-  @override
-  State<LoansScreen> createState() => _LoansScreenState();
-}
-
-class _LoansScreenState extends State<LoansScreen> {
-  LoanType type = LoanType.given;
-  bool completed = false;
-  bool _loadedInitialType = false;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (!_loadedInitialType) {
-      type = context.read<AppController>().activeLoanType;
-      _loadedInitialType = true;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
-    final visible = state.loans.where((l) => l.type == type && (completed ? l.isCompleted : !l.isCompleted)).toList();
-    final typeLoans = state.loans.where((l) => l.type == type).toList();
-    final reminderItems = state.loanRepaymentReminders.where((r) => !r.isPaid && state.loanOf(r.loanId)?.type == type).toList()..sort((a, b) => a.dueDate.compareTo(b.dueDate));
-    final totalPrincipal = typeLoans.fold<double>(0, (s, l) => s + l.amount);
-    final totalRepaid = typeLoans.fold<double>(0, (s, l) => s + l.repaidAmount);
-    final totalRemaining = typeLoans.fold<double>(0, (s, l) => s + l.remainingAmount);
-    return PageScaffold(
-      title: 'Loans',
-      subtitle: type == LoanType.given ? 'Track money others owe you' : 'Track money you owe others',
-      child: ResponsiveContent(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SleekCyclePillSelector<LoanType>(
-              options: const [
-                SleekPillOption(value: LoanType.given, label: 'Given', icon: Icons.call_made_rounded),
-                SleekPillOption(value: LoanType.taken, label: 'Taken', icon: Icons.call_received_rounded),
-              ],
-              selected: type,
-              onChanged: (v) {
-                setState(() => type = v);
-                context.read<AppController>().activeLoanType = v;
-              },
-            ),
-            const SizedBox(height: 10),
-            SleekCyclePillSelector<bool>(
-              options: const [
-                SleekPillOption(value: false, label: 'Open', icon: Icons.pending_actions_rounded),
-                SleekPillOption(value: true, label: 'Completed', icon: Icons.check_circle_rounded),
-              ],
-              selected: completed,
-              onChanged: (v) => setState(() => completed = v),
-            ),
-            const SizedBox(height: 14),
-            ExpressiveCard(
-              padding: const EdgeInsets.all(14),
-              child: Row(
-                children: [
-                  iconBubble(context, type == LoanType.given ? 'loan_given' : 'loan_taken', type == LoanType.given ? '#FF7A7A' : '#38BDF8', size: 48),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      type == LoanType.given
-                          ? 'Given loans reduce the selected account now, then repayments increase it later.'
-                          : 'Taken loans increase the selected account now, then repayments reduce it later.',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 14),
-            ExpressiveCard(child: Column(children: [
-              MiniMetric('Remaining balance', state.format(totalRemaining), Icons.account_balance_wallet_rounded),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(child: LoanSummaryMetric(label: 'Principal', value: state.format(totalPrincipal), icon: Icons.flag_rounded)),
-                const SizedBox(width: 10),
-                Expanded(child: LoanSummaryMetric(label: 'Repaid', value: state.format(totalRepaid), icon: Icons.done_all_rounded)),
-              ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(child: LoanSummaryMetric(label: 'Open', value: '${typeLoans.where((e) => !e.isCompleted).length}', icon: Icons.pending_actions_rounded)),
-                const SizedBox(width: 10),
-                Expanded(child: LoanSummaryMetric(label: 'Completed', value: '${typeLoans.where((e) => e.isCompleted).length}', icon: Icons.check_circle_rounded)),
-              ]),
-            ])),
-            if (reminderItems.isNotEmpty) ...[
-              const SectionHeader('Repayment reminders'),
-              ...reminderItems.take(3).map((reminder) {
-                final loan = state.loanOf(reminder.loanId);
-                if (loan == null) return const SizedBox.shrink();
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: LoanReminderTile(
-                    loan: loan,
-                    reminder: reminder,
-                    onPaid: () => state.markLoanRepaymentReminderPaid(loan, reminder, reminder.accountId.isNotEmpty ? reminder.accountId : loan.accountId),
-                    onDelete: () => state.deleteLoanRepaymentReminder(reminder.id),
-                  ),
-                );
-              }),
-            ],
-            const SectionHeader('Loan records'),
-            if (visible.isEmpty)
-              EmptyCard(
-                icon: Icons.handshake_rounded,
-                title: completed ? 'No completed loans' : 'No open loans yet',
-                body: completed
-                    ? 'Finished loans will move here after the full amount is repaid.'
-                    : type == LoanType.given
-                        ? 'Add money you gave to someone. Koinly will track what remains and remind you about repayments.'
-                        : 'Add money you borrowed. Koinly will track what remains and remind you when to pay.',
-                action: completed ? null : () => showLoanEditor(context, initialType: type),
-                actionLabel: type == LoanType.given ? 'Add given loan' : 'Add taken loan',
-              )
-            else
-              ...visible.map((loan) => Padding(padding: const EdgeInsets.only(bottom: 10), child: LoanTile(loan: loan))),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class LoanSummaryMetric extends StatelessWidget {
-  const LoanSummaryMetric({super.key, required this.label, required this.value, required this.icon});
-  final String label;
-  final String value;
-  final IconData icon;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-
-    Widget scaleText(String text, TextStyle? style, {FontWeight? weight}) {
-      return FittedBox(
-        fit: BoxFit.scaleDown,
-        alignment: Alignment.centerLeft,
-        child: Text(
-          text,
-          maxLines: 1,
-          softWrap: false,
-          overflow: TextOverflow.visible,
-          style: style?.copyWith(fontWeight: weight),
-        ),
-      );
-    }
-
-    return Container(
-      constraints: const BoxConstraints(minHeight: 86),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest.withOpacity(.55),
-        borderRadius: BorderRadius.circular(22),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, size: 28),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SizedBox(width: double.infinity, child: scaleText(label, textTheme.bodyLarge)),
-                const SizedBox(height: 5),
-                SizedBox(width: double.infinity, child: scaleText(value, textTheme.titleMedium, weight: FontWeight.w900)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-
-class LoanTile extends StatelessWidget {
-  const LoanTile({super.key, required this.loan});
-  final Loan loan;
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.read<AppController>();
-    final progress = loan.amount <= 0 ? 0.0 : loan.repaidAmount / loan.amount;
-    final reminders = state.loanRemindersFor(loan.id);
-    final overdue = reminders.any((r) => r.isOverdue);
-    final nextReminder = reminders.where((r) => !r.isPaid).toList()..sort((a, b) => a.dueDate.compareTo(b.dueDate));
-    final accent = overdue ? kSleekExpense : (loan.type == LoanType.given ? const Color(0xFFFF7A7A) : const Color(0xFF38BDF8));
-    final paidPercent = loan.amount <= 0 ? 0 : ((loan.repaidAmount / loan.amount) * 100).clamp(0, 100).round();
-    return ExpressiveCard(
-      color: overdue
-          ? (Theme.of(context).brightness == Brightness.dark ? const Color(0xFF2A1719) : const Color(0xFFFFF0F0))
-          : null,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(22),
-        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => LoanDetailScreen(loanId: loan.id))),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              iconBubble(context, loan.type == LoanType.given ? 'loan_given' : 'loan_taken', colorToHex(accent), size: 46),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(loan.personName, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17), maxLines: 1, overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: 2),
-                    Text(
-                      loan.type == LoanType.given ? 'Someone owes you' : 'You owe this',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
-                    ),
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(state.format(loan.remainingAmount), style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
-                  Text(overdue ? 'Overdue' : (loan.isCompleted ? 'Completed' : 'Open'), style: Theme.of(context).textTheme.labelSmall?.copyWith(color: overdue ? kSleekExpense : (loan.isCompleted ? kSleekIncome : kSleekAccent), fontWeight: FontWeight.w900)),
-                ],
-              ),
-            ]),
-            const SizedBox(height: 14),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(999),
-              child: LinearProgressIndicator(
-                minHeight: 6,
-                value: progress.clamp(0, 1).toDouble(),
-                color: accent,
-                backgroundColor: accent.withOpacity(.16),
-              ),
-            ),
-            const SizedBox(height: 9),
-            Text(
-              '$paidPercent% repaid • ${state.format(loan.repaidAmount)} of ${state.format(loan.amount)} • ${DateFormat('MMM d, yyyy').format(loan.loanDate)}',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
-            ),
-            if (loan.institution.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                loan.institution,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
-              ),
-            ],
-            if (nextReminder.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                '${nextReminder.first.isOverdue ? 'Overdue' : 'Next repayment'}: ${state.format(nextReminder.first.amount)} • ${DateFormat('MMM d, yyyy').format(nextReminder.first.dueDate)}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: nextReminder.first.isOverdue ? kSleekExpense : kSleekWarning, fontWeight: FontWeight.w900),
-              ),
-            ],
-            const SizedBox(height: 4),
-            Text(
-              '${loan.type == LoanType.given ? 'Paid from' : 'Received into'}: ${state.accountOf(loan.accountId)?.name ?? 'Unknown account'}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w800),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-
-class LoanDetailScreen extends StatelessWidget {
-  const LoanDetailScreen({super.key, required this.loanId});
-  final String loanId;
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
-    final loan = state.loans.where((l) => l.id == loanId).firstOrNull;
-    if (loan == null) return const Scaffold(body: Center(child: Text('Loan not found')));
-    return FutureBuilder<List<LoanRepayment>>(
-      future: state.database.repayments(loan.id),
-      builder: (context, snapshot) {
-        final repayments = snapshot.data ?? [];
-        final reminders = state.loanRemindersFor(loan.id);
-        final pendingReminders = reminders.where((r) => !r.isPaid).toList()..sort((a, b) => a.dueDate.compareTo(b.dueDate));
-        return PageScaffold(
-          title: loan.personName,
-          subtitle: loan.type == LoanType.given ? 'Given loan' : 'Taken loan',
-          actions: [
-            IconButton(onPressed: () => showLoanEditor(context, loan: loan), icon: const Icon(Icons.edit_rounded)),
-            IconButton(onPressed: () => showRepaymentEditor(context, loan), icon: const Icon(Icons.payments_rounded)),
-          ],
-          child: ResponsiveContent(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                LoanTile(loan: loan),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: FilledButton.icon(
-                        onPressed: loan.isCompleted ? null : () => showRepaymentEditor(context, loan),
-                        icon: const Icon(Icons.payments_rounded),
-                        label: Text(loan.type == LoanType.given ? 'Record received' : 'Record payment'),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () => showLoanEditor(context, loan: loan),
-                        icon: const Icon(Icons.edit_rounded),
-                        label: const Text('Edit loan'),
-                      ),
-                    ),
-                  ],
-                ),
-                const SectionHeader('Details'),
-                ExpressiveCard(child: Column(children: [
-                  _detailRow(loan.type == LoanType.given ? 'Paid from' : 'Received into', state.accountOf(loan.accountId)?.name ?? 'Unknown'),
-                  _detailRow('Start date', DateFormat('MMM d, yyyy').format(loan.loanDate)),
-                  _detailRow('End / due', loan.dueDate == null ? 'Not set' : DateFormat('MMM d, yyyy').format(loan.dueDate!)),
-                  if (loan.institution.isNotEmpty) _detailRow('Institution', loan.institution),
-                  if (loan.accountNo.isNotEmpty) _detailRow('Account no.', loan.accountNo),
-                  if (loan.agreementNo.isNotEmpty) _detailRow('Agreement', loan.agreementNo),
-                  if (loan.interestRate != null) _detailRow('Interest', '${loan.interestRate!.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '')}%'),
-                  _detailRow('Notes', loan.notes.isEmpty ? 'No notes' : loan.notes),
-                ])),
-                const SectionHeader('Repayment reminders'),
-                if (pendingReminders.isEmpty)
-                  const EmptyCard(icon: Icons.notifications_active_rounded, title: 'No repayment reminders', body: 'Add repayment dates while creating or editing this loan.')
-                else
-                  ...pendingReminders.map((r) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: LoanReminderTile(
-                          loan: loan,
-                          reminder: r,
-                          onPaid: () => state.markLoanRepaymentReminderPaid(loan, r, r.accountId.isNotEmpty ? r.accountId : loan.accountId),
-                          onDelete: () => state.deleteLoanRepaymentReminder(r.id),
-                        ),
-                      )),
-                const SectionHeader('Repayment history'),
-                if (repayments.isEmpty) const EmptyCard(icon: Icons.history_rounded, title: 'No repayments', body: 'Repayment records will appear here.') else ...repayments.map((r) => Padding(padding: const EdgeInsets.only(bottom: 10), child: ExpressiveCard(padding: const EdgeInsets.all(12), child: ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.payments_rounded), title: Text(state.format(r.amount), style: const TextStyle(fontWeight: FontWeight.w900)), subtitle: Text('${DateFormat('MMM d, yyyy').format(r.paidOn)} • ${state.accountOf(r.accountId.isNotEmpty ? r.accountId : loan.accountId)?.name ?? 'Unknown account'}${r.notes.isEmpty ? '' : ' • ${r.notes}'}'), trailing: IconButton(icon: const Icon(Icons.delete_outline_rounded), onPressed: () => state.deleteRepayment(r.id))))))
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _detailRow(String label, String value) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [SizedBox(width: 96, child: Text(label, style: const TextStyle(fontWeight: FontWeight.w800))), Expanded(child: Text(value))]),
-      );
-}
-
-Future<void> showLoanEditor(BuildContext context, {Loan? loan, LoanType initialType = LoanType.given}) async {
-  await showKoinlyPopup<void>(
-    context,
-    maxWidth: 560,
-    maxHeight: 700,
-    child: LoanEditor(loan: loan, initialType: initialType),
-  );
-}
-
-Future<bool> confirmDeleteLoan(BuildContext context, Loan loan) async {
-  final confirmed = await showDialog<bool>(
-    context: context,
-    builder: (_) => AlertDialog(
-      title: const Text('Delete this loan?'),
-      content: Text('This removes ${loan.personName}, repayment history, reminders, and reverses the loan balance changes from the selected accounts.'),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
-      ],
-    ),
-  );
-  return confirmed == true;
-}
-
-class LoanEditor extends StatefulWidget {
-  const LoanEditor({super.key, this.loan, required this.initialType});
-  final Loan? loan;
-  final LoanType initialType;
-
-  @override
-  State<LoanEditor> createState() => _LoanEditorState();
-}
-
-class _LoanEditorState extends State<LoanEditor> {
-  final person = TextEditingController();
-  final amount = TextEditingController();
-  final institution = TextEditingController();
-  final accountNo = TextEditingController();
-  final agreementNo = TextEditingController();
-  final interestRate = TextEditingController();
-  final notes = TextEditingController();
-  LoanType type = LoanType.given;
-  String? accountId;
-  DateTime loanDate = DateTime.now();
-  DateTime? dueDate;
-  final List<_LoanReminderDraft> reminderDrafts = [];
-
-  @override
-  void initState() {
-    super.initState();
-    final state = context.read<AppController>();
-    final loan = widget.loan;
-    if (loan != null) {
-      person.text = loan.personName;
-      amount.text = loan.amount.toStringAsFixed(2);
-      institution.text = loan.institution;
-      accountNo.text = loan.accountNo;
-      agreementNo.text = loan.agreementNo;
-      interestRate.text = loan.interestRate == null ? '' : loan.interestRate!.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
-      notes.text = loan.notes;
-      type = loan.type;
-      accountId = loan.accountId;
-      loanDate = loan.loanDate;
-      dueDate = loan.dueDate;
-      reminderDrafts.addAll(state.loanRemindersFor(loan.id).where((r) => !r.isPaid).map((r) => _LoanReminderDraft.fromReminder(r)));
-    } else {
-      type = widget.initialType;
-      accountId = state.defaultAccountId ?? state.operatingAccounts.firstOrNull?.id;
-    }
-    if (reminderDrafts.isEmpty && dueDate != null) {
-      reminderDrafts.add(_LoanReminderDraft(amount: amount.text.isEmpty ? '0' : amount.text, dueDate: dueDate!, reminderTimeMinutes: 9 * 60, notes: ''));
-    }
-  }
-
-  @override
-  void dispose() {
-    person.dispose();
-    amount.dispose();
-    institution.dispose();
-    accountNo.dispose();
-    agreementNo.dispose();
-    interestRate.dispose();
-    notes.dispose();
-    for (final draft in reminderDrafts) {
-      draft.dispose();
-    }
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
-    final accountOptions = state.operatingAccounts.isEmpty ? state.accounts : state.operatingAccounts;
-    final hasAccountOptions = accountOptions.isNotEmpty;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(widget.loan == null ? 'Add loan' : 'Edit loan', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
-            const SizedBox(height: 16),
-            SleekPillSelector<LoanType>(
-              options: const [
-                SleekPillOption(value: LoanType.given, label: 'Given Loans', icon: Icons.call_made_rounded),
-                SleekPillOption(value: LoanType.taken, label: 'Taken Loans', icon: Icons.call_received_rounded),
-              ],
-              selected: type,
-              onChanged: (v) => setState(() => type = v),
-            ),
-            const SizedBox(height: 12),
-            TextField(controller: person, decoration: InputDecoration(labelText: type == LoanType.given ? 'Borrower name' : 'Lender name')),
-            const SizedBox(height: 12),
-            TextField(controller: amount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Loan amount')),
-            const SizedBox(height: 12),
-            if (!hasAccountOptions) ...[
-              EmptyCard(
-                icon: Icons.account_balance_wallet_rounded,
-                title: 'Create an account first',
-                body: 'A loan needs an account so Koinly knows which balance should increase or decrease.',
-                action: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AccountListScreen())),
-                actionLabel: 'Open accounts',
-              ),
-              const SizedBox(height: 12),
-            ],
-            AppleSelectionField(
-              label: type == LoanType.given ? 'Paid from account' : 'Receive money into account',
-              option: accountOptions.where((a) => a.id == accountId).firstOrNull == null ? null : optionFromAccount(accountOptions.where((a) => a.id == accountId).first, state),
-              emptyText: 'Choose account',
-              onTap: () async {
-                final selected = await showAppleWheelSelectionSheet(
-                  context,
-                  title: type == LoanType.given ? 'Choose Paid From Account' : 'Choose Receiving Account',
-                  selectedId: accountId,
-                  options: accountOptions.map((a) => optionFromAccount(a, state)).toList(),
-                );
-                if (selected != null) setState(() => accountId = selected);
-              },
-            ),
-            const SizedBox(height: 6),
-            Text(
-              type == LoanType.given
-                  ? 'Given loans decrease the selected account balance.'
-                  : 'Taken loans increase the selected account balance.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            const SizedBox(height: 12),
-            Row(children: [
-              Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await pickDate(context, loanDate); if (d != null) setState(() => loanDate = d); }, icon: const Icon(Icons.date_range_rounded), label: Text('Start ${DateFormat('MMM d, yyyy').format(loanDate)}'))),
-              const SizedBox(width: 8),
-              Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await pickDate(context, dueDate ?? loanDate); if (d != null) setState(() => dueDate = d); }, icon: const Icon(Icons.event_available_rounded), label: Text(dueDate == null ? 'End / due date' : 'End ${DateFormat('MMM d').format(dueDate!)}'))),
-            ]),
-            const SizedBox(height: 12),
-            ExpressiveCard(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text('Loan details', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
-                  const SizedBox(height: 10),
-                  TextField(controller: institution, textCapitalization: TextCapitalization.words, decoration: const InputDecoration(labelText: 'Institution / provider')),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(child: TextField(controller: accountNo, decoration: const InputDecoration(labelText: 'Loan account no.'))),
-                      const SizedBox(width: 10),
-                      Expanded(child: TextField(controller: agreementNo, decoration: const InputDecoration(labelText: 'Agreement no.'))),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: interestRate,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    decoration: const InputDecoration(labelText: 'Interest rate', suffixText: '%'),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(controller: notes, minLines: 1, maxLines: 3, decoration: const InputDecoration(labelText: 'Notes')),
-            const SizedBox(height: 14),
-            ExpressiveCard(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(child: Text('Repayment reminders', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
-                      IconButton(
-                        onPressed: () => setState(() => reminderDrafts.add(_LoanReminderDraft(amount: amount.text.isEmpty ? '0' : amount.text, dueDate: dueDate ?? loanDate.add(const Duration(days: 30)), reminderTimeMinutes: 9 * 60, notes: ''))),
-                        icon: const Icon(Icons.add_alert_rounded),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    type == LoanType.given
-                        ? 'Schedule expected repayments you should receive from the borrower.'
-                        : 'Schedule repayments you need to pay back to the lender.',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
-                  ),
-                  const SizedBox(height: 10),
-                  if (reminderDrafts.isEmpty)
-                    const Text('No repayment reminders added yet.')
-                  else
-                    ...reminderDrafts.asMap().entries.map((entry) => _LoanReminderDraftTile(
-                          draft: entry.value,
-                          index: entry.key,
-                          onChanged: () => setState(() {}),
-                          onRemove: () => setState(() {
-                            final removed = reminderDrafts.removeAt(entry.key);
-                            removed.dispose();
-                          }),
-                        )),
-                ],
-              ),
-            ),
-            const SizedBox(height: 18),
-            Row(children: [
-              if (widget.loan != null) Expanded(child: OutlinedButton(onPressed: () async { final confirmed = await confirmDeleteLoan(context, widget.loan!); if (!confirmed) return; await state.deleteLoan(widget.loan!.id); if (context.mounted) Navigator.pop(context); }, child: const Text('Delete'))),
-              if (widget.loan != null) const SizedBox(width: 12),
-              Expanded(flex: 2, child: FilledButton(onPressed: () async {
-                final value = double.tryParse(amount.text) ?? 0;
-                if (person.text.trim().isEmpty) return showSnack(context, type == LoanType.given ? 'Enter the borrower name.' : 'Enter the lender name.');
-                if (value <= 0) return showSnack(context, 'Enter a valid loan amount.');
-                if (accountId == null) return showSnack(context, 'Choose the account this loan affects.');
-                final now = DateTime.now();
-                final loanId = widget.loan?.id ?? _uuid.v4();
-                final loan = Loan(
-                  id: loanId,
-                  type: type,
-                  accountId: accountId!,
-                  personName: person.text.trim(),
-                  amount: value,
-                  loanDate: loanDate,
-                  dueDate: dueDate,
-                  institution: institution.text.trim(),
-                  accountNo: accountNo.text.trim(),
-                  agreementNo: agreementNo.text.trim(),
-                  interestRate: double.tryParse(interestRate.text),
-                  notes: notes.text.trim(),
-                  repaidAmount: widget.loan?.repaidAmount ?? 0,
-                  status: widget.loan?.status ?? LoanStatus.open,
-                  createdOn: widget.loan?.createdOn ?? now,
-                  updatedOn: now,
-                );
-                if (widget.loan == null) { await state.addLoan(loan); } else { await state.updateLoan(loan); }
-                final reminders = reminderDrafts
-                    .where((draft) => (double.tryParse(draft.amount.text) ?? 0) > 0)
-                    .map((draft) => draft.toReminder(loanId: loan.id, accountId: accountId!, now: now))
-                    .toList();
-                await state.replaceLoanRepaymentReminders(loan.id, reminders);
-                if (context.mounted) {
-                  showSnack(context, widget.loan == null ? 'Loan created.' : 'Loan updated.');
-                  Navigator.pop(context);
-                }
-              }, child: Text(widget.loan == null ? 'Create loan' : 'Save loan'))),
-            ]),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-
-class LoanReminderTile extends StatelessWidget {
-  const LoanReminderTile({super.key, required this.loan, required this.reminder, required this.onPaid, required this.onDelete});
-  final Loan loan;
-  final LoanRepaymentReminder reminder;
-  final VoidCallback onPaid;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
-    final overdue = reminder.isOverdue;
-    final dueToday = reminder.isDueToday;
-    final accent = overdue ? kSleekExpense : (dueToday ? kSleekWarning : kSleekAccent);
-    final label = overdue ? 'Overdue' : (dueToday ? 'Due today' : 'Upcoming');
-    final direction = loan.type == LoanType.given ? 'Expected repayment received' : 'Repayment to pay';
-    return ExpressiveCard(
-      color: overdue
-          ? (Theme.of(context).brightness == Brightness.dark ? const Color(0xFF2A1719) : const Color(0xFFFFF0F0))
-          : null,
-      padding: const EdgeInsets.all(14),
-      child: Row(
-        children: [
-          iconBubble(context, overdue ? 'warning' : 'reminder', colorToHex(accent), size: 48),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('${state.format(reminder.amount)} • $label', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900, color: overdue ? kSleekExpense : null)),
-                const SizedBox(height: 3),
-                Text('$direction • ${DateFormat('MMM d, yyyy').format(reminder.dueDate)} • ${_formatMinutesAsTime(reminder.reminderTimeMinutes)}', maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700)),
-                if (reminder.notes.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(reminder.notes, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodySmall),
-                ],
-              ],
-            ),
-          ),
-          IconButton(onPressed: onPaid, icon: const Icon(Icons.check_circle_rounded), tooltip: 'Mark paid'),
-          IconButton(onPressed: onDelete, icon: const Icon(Icons.delete_outline_rounded), tooltip: 'Delete reminder'),
-        ],
-      ),
-    );
-  }
-}
-
-class _LoanReminderDraft {
-  _LoanReminderDraft({required String amount, required this.dueDate, required this.reminderTimeMinutes, required String notes})
-      : id = _uuid.v4(),
-        amount = TextEditingController(text: amount),
-        notes = TextEditingController(text: notes);
-
-  _LoanReminderDraft.fromReminder(LoanRepaymentReminder reminder)
-      : id = reminder.id,
-        amount = TextEditingController(text: reminder.amount.toStringAsFixed(2)),
-        dueDate = reminder.dueDate,
-        reminderTimeMinutes = reminder.reminderTimeMinutes,
-        notes = TextEditingController(text: reminder.notes);
-
-  final String id;
-  final TextEditingController amount;
-  DateTime dueDate;
-  int reminderTimeMinutes;
-  final TextEditingController notes;
-
-  LoanRepaymentReminder toReminder({required String loanId, required String accountId, required DateTime now}) => LoanRepaymentReminder(
-        id: id,
-        loanId: loanId,
-        accountId: accountId,
-        amount: double.tryParse(amount.text) ?? 0,
-        dueDate: dueDate,
-        reminderTimeMinutes: reminderTimeMinutes,
-        notes: notes.text.trim(),
-        isPaid: false,
-        createdOn: now,
-        updatedOn: now,
-      );
-
-  void dispose() {
-    amount.dispose();
-    notes.dispose();
-  }
-}
-
-class _LoanReminderDraftTile extends StatelessWidget {
-  const _LoanReminderDraftTile({required this.draft, required this.index, required this.onChanged, required this.onRemove});
-  final _LoanReminderDraft draft;
-  final int index;
-  final VoidCallback onChanged;
-  final VoidCallback onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(top: 10),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(.45),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Expanded(child: Text('Partial repayment ${index + 1}', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900))),
-              IconButton(onPressed: onRemove, icon: const Icon(Icons.close_rounded)),
-            ],
-          ),
-          const SizedBox(height: 8),
-          TextField(controller: draft.amount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Partial amount')),
-          const SizedBox(height: 8),
-          Row(children: [
-            Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await pickDate(context, draft.dueDate); if (d != null) { draft.dueDate = d; onChanged(); } }, icon: const Icon(Icons.event_rounded), label: Text(DateFormat('MMM d, yyyy').format(draft.dueDate)))),
-            const SizedBox(width: 8),
-            Expanded(child: OutlinedButton.icon(onPressed: () async { final t = await pickTime(context, TimeOfDay(hour: draft.reminderTimeMinutes ~/ 60, minute: draft.reminderTimeMinutes % 60)); if (t != null) { draft.reminderTimeMinutes = t.hour * 60 + t.minute; onChanged(); } }, icon: const Icon(Icons.notifications_active_rounded), label: Text(_formatMinutesAsTime(draft.reminderTimeMinutes)))),
-          ]),
-          const SizedBox(height: 8),
-          TextField(controller: draft.notes, minLines: 1, maxLines: 2, decoration: const InputDecoration(labelText: 'Reminder notes')),
-        ],
-      ),
-    );
-  }
-}
-
-String _formatMinutesAsTime(int minutes) {
-  final hour = (minutes ~/ 60).clamp(0, 23);
-  final minute = minutes % 60;
-  final suffix = hour >= 12 ? 'PM' : 'AM';
-  final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
-  return '$displayHour:${minute.toString().padLeft(2, '0')} $suffix';
-}
-
-Future<void> showRepaymentEditor(BuildContext context, Loan loan) async {
-  await showKoinlyPopup<void>(
-    context,
-    maxWidth: 560,
-    maxHeight: 640,
-    child: RepaymentEditor(loan: loan),
-  );
-}
-
-class RepaymentEditor extends StatefulWidget {
-  const RepaymentEditor({super.key, required this.loan});
-  final Loan loan;
-
-  @override
-  State<RepaymentEditor> createState() => _RepaymentEditorState();
-}
-
-class _RepaymentEditorState extends State<RepaymentEditor> {
-  final amount = TextEditingController();
-  final notes = TextEditingController();
-  String? accountId;
-  DateTime paidOn = DateTime.now();
-
-  @override
-  void initState() {
-    super.initState();
-    final state = context.read<AppController>();
-    amount.text = widget.loan.remainingAmount.toStringAsFixed(2);
-    accountId = widget.loan.accountId.isNotEmpty ? widget.loan.accountId : state.defaultAccountId;
-  }
-
-  @override
-  void dispose() {
-    amount.dispose();
-    notes.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
-    final accountOptions = state.operatingAccounts.isEmpty ? state.accounts : state.operatingAccounts;
-    final hasAccountOptions = accountOptions.isNotEmpty;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
-      child: SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Text(widget.loan.type == LoanType.given ? 'Repayment received' : 'Repayment paid', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
-          const SizedBox(height: 16),
-          ExpressiveCard(
-            padding: const EdgeInsets.all(14),
-            child: Row(
-              children: [
-                iconBubble(context, widget.loan.type == LoanType.given ? 'loan_given' : 'loan_taken', widget.loan.type == LoanType.given ? '#27D17F' : '#FF5353', size: 46),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    widget.loan.type == LoanType.given
-                        ? 'Record money you received back from ${widget.loan.personName}.'
-                        : 'Record money you paid back to ${widget.loan.personName}.',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w800),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextField(controller: amount, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Repayment amount')),
-          const SizedBox(height: 12),
-          if (!hasAccountOptions) ...[
-            const EmptyCard(
-              icon: Icons.account_balance_wallet_rounded,
-              title: 'No account available',
-              body: 'Create an account before recording a repayment.',
-            ),
-            const SizedBox(height: 12),
-          ],
-          AppleSelectionField(
-            label: widget.loan.type == LoanType.given ? 'Receive repayment into account' : 'Pay repayment from account',
-            option: accountOptions.where((a) => a.id == accountId).firstOrNull == null ? null : optionFromAccount(accountOptions.where((a) => a.id == accountId).first, state),
-            emptyText: 'Choose account',
-            onTap: () async {
-              final selected = await showAppleWheelSelectionSheet(
-                context,
-                title: widget.loan.type == LoanType.given ? 'Choose Receiving Account' : 'Choose Payment Account',
-                selectedId: accountId,
-                options: accountOptions.map((a) => optionFromAccount(a, state)).toList(),
-              );
-              if (selected != null) setState(() => accountId = selected);
-            },
-          ),
-          const SizedBox(height: 6),
-          Text(
-            widget.loan.type == LoanType.given
-                ? 'Repayment received increases the selected account balance.'
-                : 'Repayment paid decreases the selected account balance.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 12),
-          OutlinedButton.icon(onPressed: () async { final d = await pickDate(context, paidOn); if (d != null) setState(() => paidOn = d); }, icon: const Icon(Icons.date_range_rounded), label: Text(DateFormat('MMM d, yyyy').format(paidOn))),
-          const SizedBox(height: 12),
-          TextField(controller: notes, minLines: 1, maxLines: 3, decoration: const InputDecoration(labelText: 'Notes')),
-          const SizedBox(height: 18),
-          FilledButton(onPressed: () async {
-            final value = double.tryParse(amount.text) ?? 0;
-            if (value <= 0) return showSnack(context, 'Enter a valid repayment amount.');
-            if (accountId == null) return showSnack(context, 'Choose the account this repayment affects.');
-            final repayment = LoanRepayment(id: _uuid.v4(), loanId: widget.loan.id, accountId: accountId!, amount: value, paidOn: paidOn, notes: notes.text.trim(), createdOn: DateTime.now());
-            await state.addRepayment(widget.loan, repayment, accountId!);
-            if (context.mounted) {
-              showSnack(context, widget.loan.type == LoanType.given ? 'Repayment received.' : 'Repayment recorded.');
-              Navigator.pop(context);
-            }
-          }, child: const Text('Save repayment')),
-        ]),
-      ),
-    );
-  }
-}
-
-// -----------------------------------------------------------------------------
 // Settings, export, backup, about
 // -----------------------------------------------------------------------------
 
@@ -12081,7 +10712,7 @@ class SettingsScreen extends StatelessWidget {
             SettingsTile(icon: Icons.filter_alt_rounded, title: 'Default date filter', subtitle: _dateRangeLabel(state.dateRangeType), color: '#B4A5FF', onTap: () => showDateRangeSheet(context)),
             SettingsTile(icon: Icons.ios_share_rounded, title: 'Export', subtitle: 'CSV / PDF reports with current filters', color: '#FFB5D0', onTap: () => showExportSheet(context)),
             SettingsTile(icon: Icons.file_open_rounded, title: 'Load backup', subtitle: 'Pick a .koinlybackup file and replace local data', color: '#86E3CE', onTap: () => runLoadBackupFlow(context, state)),
-            SettingsTile(icon: Icons.tune_rounded, title: 'Advanced settings', subtitle: 'Defaults, performance, app lock, backup', color: '#9AD0F5', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdvancedSettingsScreen()))),
+            SettingsTile(icon: Icons.tune_rounded, title: 'Advanced settings', subtitle: 'Defaults, performance, backup', color: '#9AD0F5', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdvancedSettingsScreen()))),
             SettingsTile(icon: Icons.info_rounded, title: 'About app', subtitle: 'Version, credits, licenses, and links', color: '#86E3CE', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AboutScreen()))),
           ],
         ),
@@ -12658,7 +11289,10 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
   late final TextEditingController _emailController;
   late final TextEditingController _passwordController;
   late final TextEditingController _registrationKeyController;
+  late final TextEditingController _customApiBaseUrlController;
   bool _obscurePassword = true;
+  bool _endpointBusy = false;
+  late bool _useCustomCloudSync;
   late bool _registerMode;
 
   @override
@@ -12668,6 +11302,8 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
     _emailController = TextEditingController(text: state.syncAccountEmail);
     _passwordController = TextEditingController();
     _registrationKeyController = TextEditingController();
+    _customApiBaseUrlController = TextEditingController(text: state.customCloudSyncApiBaseUrl);
+    _useCustomCloudSync = state.useCustomCloudSync;
     _registerMode = widget.initialRegisterMode;
   }
 
@@ -12676,13 +11312,42 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
     _emailController.dispose();
     _passwordController.dispose();
     _registrationKeyController.dispose();
+    _customApiBaseUrlController.dispose();
     super.dispose();
+  }
+
+  Future<void> _saveSyncEndpoint() async {
+    final state = context.read<AppController>();
+    final wasSignedIn = state.cloudSyncEnabled;
+    setState(() => _endpointBusy = true);
+    try {
+      await state.configureAccountSyncEndpoint(
+        useCustom: _useCustomCloudSync,
+        customApiBaseUrl: _customApiBaseUrlController.text,
+      );
+      if (!mounted) return;
+      _customApiBaseUrlController.text = state.customCloudSyncApiBaseUrl;
+      showSnack(
+        context,
+        wasSignedIn && !state.cloudSyncEnabled
+            ? 'Cloud sync service changed. Sign in to the selected service.'
+            : _useCustomCloudSync
+                ? 'Self-hosted Worker validated and enabled.'
+                : 'Default cloud sync enabled.',
+      );
+    } catch (error) {
+      if (mounted) {
+        showSnack(context, redactSyncSecrets(error.toString().replaceFirst('Bad state: ', '').replaceFirst('Exception: ', '')));
+      }
+    } finally {
+      if (mounted) setState(() => _endpointBusy = false);
+    }
   }
 
   Future<void> _login({required bool register}) async {
     final state = context.read<AppController>();
-    if (CloudSyncService.configuredApiBaseUrl.trim().isEmpty) {
-      showSnack(context, 'Online sync backend is not configured in this build.');
+    if (state.cloudSyncApiBaseUrl.trim().isEmpty) {
+      showSnack(context, 'Choose a configured cloud sync service first.');
       return;
     }
     if (_emailController.text.trim().isEmpty || _passwordController.text.isEmpty) {
@@ -12720,7 +11385,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Restore cloud copy?'),
-        content: const Text('This downloads the cloud data for this account and completely overwrites local accounts, categories, transactions, budgets, loans, and repayment reminders on this device.'),
+        content: const Text('This downloads the cloud data for this account and completely overwrites local accounts, categories, transactions, and budgets on this device.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Restore cloud')),
@@ -12752,9 +11417,9 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
   Widget build(BuildContext context) {
     final state = context.watch<AppController>();
     final signedIn = state.cloudSyncEnabled && state.syncAccountEmail.isNotEmpty;
-    final busy = state.cloudSyncOperationBusy;
+    final busy = state.cloudSyncOperationBusy || _endpointBusy;
     final uploadButtonLabel = state.authoritativeCloudUploadPending ? 'Upload restored data' : 'Upload local changes';
-    final backendConfigured = CloudSyncService.configuredApiBaseUrl.trim().isNotEmpty;
+    final backendConfigured = state.cloudSyncApiBaseUrl.trim().isNotEmpty;
     return PageScaffold(
       title: 'Account & sync',
       subtitle: signedIn ? state.syncAccountEmail : 'Multi-device online sync',
@@ -12763,6 +11428,54 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            ExpressiveCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text('Cloud sync service', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 10),
+                  SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(value: false, icon: Icon(Icons.cloud_rounded), label: Text('Default')),
+                      ButtonSegment(value: true, icon: Icon(Icons.dns_rounded), label: Text('Self-hosted')),
+                    ],
+                    selected: {_useCustomCloudSync},
+                    onSelectionChanged: busy ? null : (selection) => setState(() => _useCustomCloudSync = selection.first),
+                  ),
+                  if (_useCustomCloudSync) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _customApiBaseUrlController,
+                      enabled: !busy,
+                      keyboardType: TextInputType.url,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: const InputDecoration(
+                        labelText: 'Cloudflare Worker URL',
+                        hintText: 'https://my-sync.example.workers.dev',
+                        prefixIcon: Icon(Icons.link_rounded),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : _saveSyncEndpoint,
+                    icon: _endpointBusy
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.verified_rounded),
+                    label: Text(_useCustomCloudSync ? 'Validate and use Worker' : 'Use default service'),
+                  ),
+                  if (signedIn) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      'Changing services signs out this device because each backend has separate accounts and tokens.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
             ExpressiveCard(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -14636,41 +13349,6 @@ class AdvancedSettingsScreen extends StatelessWidget {
               ),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: ExpressiveCard(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Row(
-                children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: colorFromHex('#9AD0F5').withOpacity(.16),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: colorFromHex('#9AD0F5').withOpacity(.20)),
-                    ),
-                    child: Icon(Icons.lock_rounded, color: colorFromHex('#9AD0F5')),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('App lock', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Uses fingerprint or device PIN/password when available.',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Switch(value: state.appLockEnabled, onChanged: state.setAppLock),
-                ],
-              ),
-            ),
-          ),
           SettingsTile(icon: Icons.backup_rounded, title: 'Backup', color: '#86E3CE', onTap: () => runBackupFlow(context, state)),
           SettingsTile(icon: Icons.file_open_rounded, title: 'Load backup', subtitle: 'Pick a backup file and overwrite this device', color: '#B4A5FF', onTap: () => runLoadBackupFlow(context, state)),
           SettingsTile(
@@ -14916,7 +13594,7 @@ Future<void> showDefaultSelection(BuildContext context, String mode) async {
 
   final isIncome = mode == 'income';
   final categories = state.categories
-      .where((category) => category.type == (isIncome ? CategoryType.income : CategoryType.expense) && !category.isLoanSystemCategory)
+      .where((category) => category.type == (isIncome ? CategoryType.income : CategoryType.expense))
       .toList();
 
   final selected = await showAppleWheelSelectionSheet(
