@@ -93,35 +93,58 @@ jobs:
       - name: Prepare artifact folder
         run: mkdir -p artifacts
 
-      - name: Prepare Android release signing
+      - name: Prepare optional Android release signing
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          configured=0
           for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing required Android signing secret: $name"
-              exit 1
+            if [ -n "${!name}" ]; then
+              configured=$((configured + 1))
             fi
           done
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/koinly-release.jks"
+
+          if [ "$configured" -ne 0 ] && [ "$configured" -ne 4 ]; then
+            echo "::error::Android signing is only partially configured. Add all four ANDROID_KEYSTORE_* / ANDROID_KEY_* secrets, or remove all four to use a temporary CI key."
+            exit 1
+          fi
+
+          if [ "$configured" -eq 4 ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/koinly-release.jks"
+            echo "Using the configured Android release key."
+          else
+            ANDROID_KEYSTORE_PASSWORD=android
+            ANDROID_KEY_ALIAS=androiddebugkey
+            ANDROID_KEY_PASSWORD=android
+            keytool -genkeypair -noprompt \
+              -keystore "$RUNNER_TEMP/koinly-release.jks" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+              -alias "$ANDROID_KEY_ALIAS" \
+              -keypass "$ANDROID_KEY_PASSWORD" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Koinly CI, O=Koinly, C=US"
+            echo "::warning::Android signing secrets are not configured. Artifacts use a temporary CI key and cannot update an installation from another workflow run."
+          fi
+
           chmod 600 "$RUNNER_TEMP/koinly-release.jks"
+          keytool -list -keystore "$RUNNER_TEMP/koinly-release.jks" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" >/dev/null
           echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/koinly-release.jks" >> "$GITHUB_ENV"
           echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
           echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
           echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
 
-      - name: Validate sync backend build config
+      - name: Configure optional default sync backend
         env:
           KOINLY_SYNC_API_BASE_URL: ${{ secrets.KOINLY_SYNC_API_BASE_URL || vars.KOINLY_SYNC_API_BASE_URL }}
         run: |
           if [ -z "$KOINLY_SYNC_API_BASE_URL" ]; then
-            echo "::error::Missing KOINLY_SYNC_API_BASE_URL. Add it as a GitHub repository secret or variable before building app releases."
-            exit 1
+            echo "::warning::KOINLY_SYNC_API_BASE_URL is not configured. Default cloud sync will be unavailable; users can still enter a self-hosted Worker URL in the app."
+          else
+            echo "KOINLY_SYNC_API_BASE_URL=$KOINLY_SYNC_API_BASE_URL" >> "$GITHUB_ENV"
           fi
-          echo "KOINLY_SYNC_API_BASE_URL=$KOINLY_SYNC_API_BASE_URL" >> "$GITHUB_ENV"
 
       - name: Build Android App Bundle
         run: |
@@ -310,16 +333,16 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Validate sync backend build config
+      - name: Configure optional default sync backend
         shell: pwsh
         env:
           KOINLY_SYNC_API_BASE_URL: ${{ secrets.KOINLY_SYNC_API_BASE_URL || vars.KOINLY_SYNC_API_BASE_URL }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:KOINLY_SYNC_API_BASE_URL)) {
-            Write-Host "::error::Missing KOINLY_SYNC_API_BASE_URL. Add it as a GitHub repository secret or variable before building app releases."
-            exit 1
+            Write-Host "::warning::KOINLY_SYNC_API_BASE_URL is not configured. Default cloud sync will be unavailable; users can still enter a self-hosted Worker URL in the app."
+          } else {
+            "KOINLY_SYNC_API_BASE_URL=$env:KOINLY_SYNC_API_BASE_URL" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
-          "KOINLY_SYNC_API_BASE_URL=$env:KOINLY_SYNC_API_BASE_URL" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Prepare optional Windows code signing
         shell: pwsh
