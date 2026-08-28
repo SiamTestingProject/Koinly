@@ -70,7 +70,6 @@ IconData iconFor(String name) {
     case 'money': return Icons.attach_money_rounded;
     case 'exchange': return Icons.currency_exchange_rounded;
     case 'coupon': return Icons.confirmation_number_rounded;
-    case 'handshake': return Icons.handshake_rounded;
     case 'donation': return Icons.volunteer_activism_rounded;
     case 'security': return Icons.security_rounded;
     case 'insurance': return Icons.policy_rounded;

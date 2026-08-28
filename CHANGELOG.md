@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1038] - 2026-08-28
+
+### Changed
+
+- Removed obsolete compatibility paths and unused media from the source
+  package.
+- Updated project documentation to match the current feature set.
+
 ## [1.0.1037] - 2026-08-28
 
 ### Changed
@@ -124,7 +132,8 @@
 ### Changed
 
 - Android release signing now requires injected keystore secrets; the release keystore and passwords are no longer stored in source.
-- Removed the obsolete debt-tracking and device-lock modules from the application UI, models, notifications, and dependencies.
+- Removed the obsolete device-lock module from the application UI, models,
+  notifications, and dependencies.
 
 - The default-service Create account form now requires a Registration Key and
   relies on backend validation; self-hosted registration uses the first-owner

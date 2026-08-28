@@ -1,10 +1,6 @@
 # Koinly
 
 <p align="center">
-  <img src="assets/images/koinly-banner.png" alt="Koinly local-first personal finance tracker" width="100%">
-</p>
-
-<p align="center">
   <a href="https://flutter.dev"><img src="https://img.shields.io/badge/Flutter-Material%203-02569B?logo=flutter&logoColor=white" alt="Flutter"></a>
   <a href="https://github.com/SiamTestingProject/Koinly/actions/workflows/build-android-apks.yml"><img src="https://github.com/SiamTestingProject/Koinly/actions/workflows/build-android-apks.yml/badge.svg" alt="Build status"></a>
   <img src="https://img.shields.io/badge/platform-Android%20%7C%20Windows-00B8C8" alt="Android and Windows">
@@ -19,7 +15,6 @@
 ## Contents
 
 - [Overview](#overview)
-- [Screenshots](#screenshots)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
@@ -37,7 +32,7 @@
 
 ## Overview
 
-Koinly helps users manage accounts, transactions, budgets, loans, categories,
+Koinly helps users manage accounts, transactions, budgets, categories,
 reports, and backups without requiring an online account. Finance data is
 written to SQLite on the device first, so normal app use remains available
 without an internet connection.
@@ -52,31 +47,6 @@ Cloud synchronization is optional:
 The application never embeds Turso credentials. It communicates with the
 selected sync service only through HTTPS requests to a Cloudflare Worker.
 
-## Screenshots
-
-<table>
-  <tr>
-    <td align="center"><img src="assets/images/image1.png" alt="Koinly home dashboard" width="220"></td>
-    <td align="center"><img src="assets/images/image2.png" alt="Koinly analysis screen" width="220"></td>
-    <td align="center"><img src="assets/images/image3.png" alt="Koinly loans screen" width="220"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>Dashboard</strong></td>
-    <td align="center"><strong>Analysis</strong></td>
-    <td align="center"><strong>Loans</strong></td>
-  </tr>
-  <tr>
-    <td align="center"><img src="assets/images/image4.png" alt="Koinly transaction list" width="220"></td>
-    <td align="center"><img src="assets/images/image5.png" alt="Koinly category analysis" width="220"></td>
-    <td align="center"><img src="assets/images/app_icon.png" alt="Koinly app icon" width="180"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>Transactions</strong></td>
-    <td align="center"><strong>Categories</strong></td>
-    <td align="center"><strong>Material 3 design</strong></td>
-  </tr>
-</table>
-
 ## Features
 
 ### Personal finance
@@ -86,7 +56,6 @@ selected sync service only through HTTPS requests to a Cloudflare Worker.
 - Custom income and expense categories
 - Monthly budgets with progress tracking
 - Cash-flow trends, category breakdowns, and financial summaries
-- Money-given and money-taken loan tracking
 - Search, date filters, and account/category filters
 - Savings suggestions and planning tools
 
@@ -196,7 +165,7 @@ unavailable.
 
 ```bash
 flutter build apk --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1037 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1038 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -208,7 +177,7 @@ or test builds; see [Android signing](#android-signing).
 
 ```bash
 flutter build windows --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1037 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1038 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 

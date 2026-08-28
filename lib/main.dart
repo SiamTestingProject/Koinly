@@ -95,9 +95,6 @@ class KoinlyDatabase {
       },
       onUpgrade: (database, oldVersion, newVersion) async {
         await _createSchema(database);
-        if (oldVersion < 6) {
-          await _removeLegacyLoanFeatureData(database);
-        }
       },
       onOpen: (database) async {
         await _createSchema(database);
@@ -213,112 +210,6 @@ class KoinlyDatabase {
     ''');
     await database.execute('CREATE INDEX IF NOT EXISTS idx_sync_outbox_created ON sync_outbox(created_at)');
     await database.execute('CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open ON sync_conflicts(resolved_at, created_at)');
-  }
-
-  Future<void> _removeLegacyLoanFeatureData(sql.Database database) async {
-    const legacyEntityTables = [
-      'loan_repayment_reminders',
-      'loan_repayments',
-      'loans',
-    ];
-    const legacyCategoryNames = [
-      'Loan Given',
-      'Loan Taken',
-      'Loan Repayment Received',
-      'Loan Repayment Paid',
-    ];
-
-    final tableRows = await database.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'");
-    final existingTables = tableRows.map((row) => row['name']?.toString() ?? '').toSet();
-    final transactionColumns = existingTables.contains('transactions')
-        ? (await database.rawQuery('PRAGMA table_info(transactions)')).map((row) => row['name']?.toString() ?? '').toSet()
-        : <String>{};
-
-    await database.transaction((txn) async {
-      // Queue cloud tombstones before removing legacy local records.
-      if (existingTables.contains('sync_outbox')) {
-        for (final table in legacyEntityTables) {
-          if (!existingTables.contains(table)) continue;
-          final rows = await txn.query(table, columns: ['id']);
-          for (final row in rows) {
-            final entityId = row['id']?.toString() ?? '';
-            if (entityId.isEmpty) continue;
-            final versionRows = await txn.query(
-              'sync_entity_versions',
-              columns: ['version'],
-              where: 'entity_type = ? AND entity_id = ?',
-              whereArgs: [table, entityId],
-              limit: 1,
-            );
-            final baseVersion = versionRows.isEmpty ? 0 : ((versionRows.first['version'] as num?)?.toInt() ?? 0);
-            await txn.insert(
-              'sync_outbox',
-              {
-                'id': _uuid.v4(),
-                'entity_type': table,
-                'entity_id': entityId,
-                'operation': 'delete',
-                'payload_json': null,
-                'base_version': baseVersion,
-                'created_at': DateTime.now().millisecondsSinceEpoch,
-              },
-              conflictAlgorithm: sql.ConflictAlgorithm.replace,
-            );
-          }
-        }
-      }
-
-      // Rebuild transactions without obsolete loan linkage columns and rows.
-      if (transactionColumns.contains('loan_id') || transactionColumns.contains('repayment_id')) {
-        await txn.execute('DROP TABLE IF EXISTS transactions_v6_clean');
-        await txn.execute('''
-          CREATE TABLE transactions_v6_clean(
-            id TEXT PRIMARY KEY,
-            type TEXT NOT NULL,
-            amount REAL NOT NULL,
-            notes TEXT NOT NULL,
-            category_id TEXT NOT NULL,
-            from_account_id TEXT NOT NULL,
-            to_account_id TEXT,
-            image_path TEXT NOT NULL DEFAULT '',
-            created_on INTEGER NOT NULL,
-            updated_on INTEGER NOT NULL
-          )
-        ''');
-        final keepCondition = transactionColumns.contains('loan_id') ? 'WHERE loan_id IS NULL' : '';
-        await txn.execute('''
-          INSERT INTO transactions_v6_clean(
-            id, type, amount, notes, category_id, from_account_id,
-            to_account_id, image_path, created_on, updated_on
-          )
-          SELECT id, type, amount, notes, category_id, from_account_id,
-                 to_account_id, image_path, created_on, updated_on
-          FROM transactions $keepCondition
-        ''');
-        await txn.execute('DROP TABLE transactions');
-        await txn.execute('ALTER TABLE transactions_v6_clean RENAME TO transactions');
-      }
-
-      for (final table in legacyEntityTables) {
-        if (existingTables.contains(table)) {
-          await txn.execute('DROP TABLE IF EXISTS $table');
-        }
-      }
-
-      // Do not delete a same-named user category if a normal transaction uses it.
-      for (final name in legacyCategoryNames) {
-        await txn.rawDelete(
-          'DELETE FROM categories WHERE name = ? AND id NOT IN (SELECT category_id FROM transactions)',
-          [name],
-        );
-      }
-      if (existingTables.contains('sync_conflicts')) {
-        await txn.delete(
-          'sync_conflicts',
-          where: "entity_type IN ('loans','loan_repayments','loan_repayment_reminders')",
-        );
-      }
-    });
   }
 
   Future<void> _seed(sql.Database database) async {
@@ -568,11 +459,6 @@ class KoinlyDatabase {
         final rows = (data[table] as List? ?? []).cast<Map>();
         for (final row in rows) {
           final normalized = Map<String, Object?>.from(row);
-          if (table == 'transactions') {
-            final legacyLoanId = normalized.remove('loan_id')?.toString() ?? '';
-            normalized.remove('repayment_id');
-            if (legacyLoanId.isNotEmpty) continue;
-          }
           await txn.insert(table, normalized, conflictAlgorithm: sql.ConflictAlgorithm.replace);
         }
       }
@@ -5737,8 +5623,8 @@ class MiniMetric extends StatelessWidget {
     if (lower.contains('income') || lower.contains('saving')) return kSleekIncome;
     if (lower.contains('expense') || lower.contains('spent') || lower.contains('overdue')) return kSleekExpense;
     if (lower.contains('balance') || lower.contains('remaining')) return kSleekAccent;
-    if (lower.contains('principal') || lower.contains('open')) return const Color(0xFF8AB4FF);
-    if (lower.contains('repaid') || lower.contains('completed')) return const Color(0xFF2BD9A1);
+    if (lower.contains('open')) return const Color(0xFF8AB4FF);
+    if (lower.contains('completed')) return const Color(0xFF2BD9A1);
     return kSleekAccent;
   }
 
@@ -8448,14 +8334,12 @@ bool isRecurringPaymentTransaction(AppController state, MoneyTransaction tx) {
     'mobile recharge',
     'recharge',
     'electricity',
-    'emi',
     'utility',
     'school fee',
     'fee',
     'netflix',
     'spotify',
     'youtube',
-    'installment',
   ];
   return keywords.any(text.contains);
 }
@@ -8851,7 +8735,7 @@ class FinancialHealthStatusCard extends StatelessWidget {
 
   Color _statusColor() {
     final lower = summary.status.toLowerCase();
-    if (lower.contains('over') || lower.contains('debt')) return kSleekExpense;
+    if (lower.contains('over')) return kSleekExpense;
     if (lower.contains('strong') || lower.contains('saved') || lower.contains('reduced')) return kSleekIncome;
     return kSleekAccent;
   }
