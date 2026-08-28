@@ -252,6 +252,7 @@ class MoneyTransaction {
     required this.id,
     required this.type,
     required this.amount,
+    this.title = '',
     required this.notes,
     required this.categoryId,
     required this.fromAccountId,
@@ -267,6 +268,7 @@ class MoneyTransaction {
   final String id;
   final MoneyTransactionType type;
   final double amount;
+  final String title;
   final String notes;
   final String categoryId;
   final String fromAccountId;
@@ -286,6 +288,7 @@ class MoneyTransaction {
     String? id,
     MoneyTransactionType? type,
     double? amount,
+    String? title,
     String? notes,
     String? categoryId,
     String? fromAccountId,
@@ -300,6 +303,7 @@ class MoneyTransaction {
         id: id ?? this.id,
         type: type ?? this.type,
         amount: amount ?? this.amount,
+        title: title ?? this.title,
         notes: notes ?? this.notes,
         categoryId: categoryId ?? this.categoryId,
         fromAccountId: fromAccountId ?? this.fromAccountId,
@@ -316,6 +320,7 @@ class MoneyTransaction {
         'id': id,
         'type': enumName(type),
         'amount': amount,
+        'title': title,
         'notes': notes,
         'category_id': categoryId,
         'from_account_id': fromAccountId,
@@ -332,6 +337,7 @@ class MoneyTransaction {
         id: map['id'] as String,
         type: enumByName(MoneyTransactionType.values, map['type'] as String?, MoneyTransactionType.expense),
         amount: (map['amount'] as num? ?? 0).toDouble(),
+        title: map['title'] as String? ?? '',
         notes: map['notes'] as String? ?? '',
         categoryId: map['category_id'] as String? ?? '',
         fromAccountId: map['from_account_id'] as String? ?? '',

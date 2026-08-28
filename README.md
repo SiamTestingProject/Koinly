@@ -53,6 +53,7 @@ selected sync service only through HTTPS requests to a Cloudflare Worker.
 
 - Multiple cash, bank, card, savings, and custom accounts
 - Income, expense, and transfer transactions
+- Required titles for income and expense transactions, shown throughout transaction history
 - Custom income and expense categories
 - Monthly budgets with progress tracking
 - Lending and borrowing records with contacts, repayments, due dates, and APR-based interest
@@ -67,7 +68,6 @@ selected sync service only through HTTPS requests to a Cloudflare Worker.
 - No account required for local-only use
 - Encrypted `.koinlybackup` backup and restore
 - Automatic safety backups before destructive restore operations
-- CSV and PDF export
 - Platform secure storage for sync access and refresh tokens
 - Sync credentials excluded from app backups
 - Privacy-safe diagnostic reports in **Advanced settings > Data health**
@@ -167,7 +167,7 @@ unavailable.
 
 ```bash
 flutter build apk --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1041 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1043 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -179,7 +179,7 @@ or test builds; see [Android signing](#android-signing).
 
 ```bash
 flutter build windows --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1041 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1043 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 

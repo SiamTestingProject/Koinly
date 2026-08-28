@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.1043] - 2026-08-28
+
+### Changed
+
+- Simplified the main Settings screen and centralized backup and restore tools
+  in Advanced settings.
+
+## [1.0.1042] - 2026-08-28
+
+### Added
+
+- Added a required Title field when creating or editing an income or expense
+  transaction.
+- Transaction titles now appear as the primary label throughout transaction,
+  category, and budget history.
+
+### Changed
+
+- Existing income and expense records receive their category name as a safe
+  title during the database upgrade.
+- Backup and full-sync payload versions were advanced for the new transaction
+  field.
+
 ## [1.0.1041] - 2026-08-28
 
 ### Changed

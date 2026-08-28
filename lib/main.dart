@@ -18,9 +18,6 @@ import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
-import 'package:printing/printing.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:sqflite/sqflite.dart' as sql;
@@ -95,7 +92,7 @@ class KoinlyDatabase {
     final path = p.join(dir, 'koinly_flutter.db');
     _db = await sql.openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: (database, version) async {
         await _createSchema(database);
         await _seed(database);
@@ -143,6 +140,7 @@ class KoinlyDatabase {
         id TEXT PRIMARY KEY,
         type TEXT NOT NULL,
         amount REAL NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
         notes TEXT NOT NULL,
         category_id TEXT NOT NULL,
         from_account_id TEXT NOT NULL,
@@ -287,6 +285,17 @@ class KoinlyDatabase {
     if (!columns.contains('exclude_from_reports')) {
       await database.execute('ALTER TABLE transactions ADD COLUMN exclude_from_reports INTEGER NOT NULL DEFAULT 0');
     }
+    if (!columns.contains('title')) {
+      await database.execute("ALTER TABLE transactions ADD COLUMN title TEXT NOT NULL DEFAULT ''");
+    }
+    await database.rawUpdate('''
+      UPDATE transactions
+      SET title = COALESCE(
+        (SELECT name FROM categories WHERE categories.id = transactions.category_id),
+        CASE type WHEN 'income' THEN 'Income' ELSE 'Expense' END
+      )
+      WHERE type IN ('income', 'expense') AND TRIM(title) = ''
+    ''');
     if (!columns.contains('linked_entity_type')) {
       await database.execute('ALTER TABLE transactions ADD COLUMN linked_entity_type TEXT');
     }
@@ -838,84 +847,6 @@ class KoinlyDatabase {
   }
 }
 
-class ExportService {
-  static Future<void> exportCsv(AppController state, List<MoneyTransaction> txs) async {
-    final dir = await getTemporaryDirectory();
-    final file = File(p.join(dir.path, 'koinly_export_${DateFormat('yyyyMMdd_HHmm').format(DateTime.now())}.csv'));
-    final buffer = StringBuffer();
-    final summary = state.summaryFor(txs);
-    buffer.writeln('Export date,${DateTime.now().toIso8601String()}');
-    buffer.writeln('Total transactions,${txs.length}');
-    buffer.writeln('Total income,${summary.income}');
-    buffer.writeln('Total expense,${summary.expense}');
-    buffer.writeln('Net balance,${summary.balance}');
-    buffer.writeln();
-    buffer.writeln('Date,Time,Transaction type,Category,Category type,From account,Account type,To account,Amount,Notes');
-    for (final tx in txs) {
-      final category = state.categoryOf(tx.categoryId);
-      final from = state.accountOf(tx.fromAccountId);
-      final to = tx.toAccountId == null ? null : state.accountOf(tx.toAccountId!);
-      final row = [
-        DateFormat('yyyy-MM-dd').format(tx.createdOn),
-        DateFormat('HH:mm').format(tx.createdOn),
-        tx.displayType,
-        category?.name ?? '',
-        category == null ? '' : enumName(category.type),
-        from?.name ?? '',
-        from == null ? '' : enumName(from.type),
-        to?.name ?? '',
-        tx.amount.toStringAsFixed(2),
-        tx.notes.replaceAll('\n', ' '),
-      ];
-      buffer.writeln(row.map(_csvEscape).join(','));
-    }
-    await file.writeAsString(buffer.toString());
-    await Share.shareXFiles([XFile(file.path)], text: 'Koinly CSV export');
-  }
-
-  static String _csvEscape(String input) => '"${input.replaceAll('"', '""')}"';
-
-  static Future<void> exportPdf(AppController state, List<MoneyTransaction> txs) async {
-    final pdf = pw.Document();
-    final summary = state.summaryFor(txs);
-    pdf.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        build: (context) => [
-          pw.Header(level: 0, child: pw.Text('Koinly Export Report')),
-          pw.Text('Export date/time: ${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now())}'),
-          pw.SizedBox(height: 8),
-          pw.Text('Total transactions: ${txs.length}'),
-          pw.Text('Total income: ${state.format(summary.income)}'),
-          pw.Text('Total expense: ${state.format(summary.expense)}'),
-          pw.Text('Net balance: ${state.format(summary.balance)}'),
-          pw.SizedBox(height: 16),
-          pw.Table.fromTextArray(
-            headers: const ['Date', 'Type', 'Category', 'From', 'To', 'Amount', 'Notes'],
-            data: txs.map((tx) {
-              final category = state.categoryOf(tx.categoryId);
-              final from = state.accountOf(tx.fromAccountId);
-              final to = tx.toAccountId == null ? null : state.accountOf(tx.toAccountId!);
-              return [
-                DateFormat('yyyy-MM-dd HH:mm').format(tx.createdOn),
-                tx.displayType,
-                category?.name ?? '',
-                from?.name ?? '',
-                to?.name ?? '',
-                state.format(tx.amount),
-                tx.notes,
-              ];
-            }).toList(),
-            cellStyle: const pw.TextStyle(fontSize: 8),
-            headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8),
-          ),
-        ],
-      ),
-    );
-    await Printing.sharePdf(bytes: await pdf.save(), filename: 'koinly_report.pdf');
-  }
-}
-
 class BackupService {
   static const String safetyBackupPrefix = 'koinly_safety_';
   static const int maxSafetyBackups = 3;
@@ -954,7 +885,7 @@ class BackupService {
   static Future<File> createBackup(AppController state) async {
     final dir = await getTemporaryDirectory();
     final payload = {
-      'version': 5,
+      'version': 6,
       'created_at': DateTime.now().toIso8601String(),
       'database': await state.database.exportAll(),
       'preferences': await state.exportPreferences(),
@@ -967,7 +898,7 @@ class BackupService {
   static Future<File> createSafetyBackup(AppController state, {required String reason}) async {
     final backupsDir = await backupStorageDirectory();
     final payload = {
-      'version': 5,
+      'version': 6,
       'backup_type': 'safety',
       'reason': reason,
       'created_at': DateTime.now().toIso8601String(),
@@ -7927,11 +7858,17 @@ class TransactionTile extends StatelessWidget {
     final toAccount = tx.toAccountId == null ? null : state.accountOf(tx.toAccountId!);
     final amountPrefix = tx.type == MoneyTransactionType.expense ? '-' : tx.type == MoneyTransactionType.income ? '+' : '';
     final amountColor = tx.type == MoneyTransactionType.expense ? kSleekExpense : tx.type == MoneyTransactionType.income ? kSleekIncome : kSleekAccent;
+    final savedTitle = tx.title.trim();
     final title = tx.type == MoneyTransactionType.transfer
         ? '${account?.name ?? ''} → ${toAccount?.name ?? ''}'
-        : tx.displayType == enumName(tx.type)
-            ? category?.name ?? 'Unknown'
-            : tx.displayType;
+        : savedTitle.isNotEmpty
+            ? savedTitle
+            : category?.name ?? 'Unknown';
+    final subtitleParts = <String>[
+      if (tx.type != MoneyTransactionType.transfer && savedTitle.isNotEmpty && category != null) category.name,
+      DateFormat('MMM d, yyyy • h:mm a').format(tx.createdOn),
+      if (tx.notes.trim().isNotEmpty) tx.notes.trim(),
+    ];
     return ExpressiveCard(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
       radius: 24,
@@ -7942,7 +7879,7 @@ class TransactionTile extends StatelessWidget {
             : iconBubble(context, category?.iconName ?? 'category', category?.iconColor ?? '#78D8E8', size: 44),
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
         subtitle: Text(
-          '${DateFormat('MMM d, yyyy • h:mm a').format(tx.createdOn)}${tx.notes.isEmpty ? '' : ' • ${tx.notes}'}',
+          subtitleParts.join(' • '),
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
           style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700),
@@ -7977,6 +7914,7 @@ class TransactionEditor extends StatefulWidget {
 }
 
 class _TransactionEditorState extends State<TransactionEditor> {
+  final title = TextEditingController();
   final notes = TextEditingController();
   final amount = TextEditingController(text: '0');
   MoneyTransactionType type = MoneyTransactionType.expense;
@@ -7991,6 +7929,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
     final state = context.read<AppController>();
     final tx = widget.transaction;
     if (tx != null) {
+      title.text = tx.title;
       notes.text = tx.notes;
       amount.text = tx.amount.toStringAsFixed(2);
       type = tx.type;
@@ -8003,6 +7942,14 @@ class _TransactionEditorState extends State<TransactionEditor> {
       categoryId = widget.lockedCategory?.id ?? (type == MoneyTransactionType.income ? state.defaultIncomeCategoryId : state.defaultExpenseCategoryId);
       fromAccountId = state.defaultAccountId ?? state.operatingAccounts.firstOrNull?.id;
     }
+  }
+
+  @override
+  void dispose() {
+    title.dispose();
+    notes.dispose();
+    amount.dispose();
+    super.dispose();
   }
 
   @override
@@ -8069,6 +8016,21 @@ class _TransactionEditorState extends State<TransactionEditor> {
               decoration: const InputDecoration(prefixIcon: Icon(Icons.calculate_rounded), labelText: 'Amount'),
             ),
             const SizedBox(height: 12),
+            if (type != MoneyTransactionType.transfer) ...[
+              TextField(
+                controller: title,
+                textInputAction: TextInputAction.next,
+                textCapitalization: TextCapitalization.sentences,
+                maxLength: 100,
+                decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.title_rounded),
+                  labelText: 'Title',
+                  hintText: 'Example: Lunch, Salary, Groceries',
+                  counterText: '',
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             if (type != MoneyTransactionType.transfer && widget.lockedCategory == null)
               AppleSelectionField(
                 label: 'Category',
@@ -8143,6 +8105,8 @@ class _TransactionEditorState extends State<TransactionEditor> {
               Expanded(flex: 2, child: FilledButton(onPressed: () async {
                 final value = double.tryParse(amount.text) ?? 0;
                 if (value <= 0) return showSnack(context, 'Enter a valid amount');
+                final transactionTitle = title.text.trim();
+                if (type != MoneyTransactionType.transfer && transactionTitle.isEmpty) return showSnack(context, 'Enter a transaction title');
                 if (fromAccountId == null) return showSnack(context, 'Select an account');
                 if (type == MoneyTransactionType.transfer && (toAccountId == null || toAccountId == fromAccountId)) return showSnack(context, 'Select a different destination account');
                 if (type != MoneyTransactionType.transfer && categoryId == null) return showSnack(context, 'Select a category');
@@ -8150,10 +8114,15 @@ class _TransactionEditorState extends State<TransactionEditor> {
                   id: widget.transaction?.id ?? _uuid.v4(),
                   type: type,
                   amount: value,
+                  title: type == MoneyTransactionType.transfer ? '' : transactionTitle,
                   notes: notes.text.trim(),
                   categoryId: type == MoneyTransactionType.transfer ? '' : (categoryId ?? ''),
                   fromAccountId: fromAccountId!,
                   toAccountId: type == MoneyTransactionType.transfer ? toAccountId : null,
+                  imagePath: widget.transaction?.imagePath ?? '',
+                  excludeFromReports: widget.transaction?.excludeFromReports ?? false,
+                  linkedEntityType: widget.transaction?.linkedEntityType,
+                  linkedEntityId: widget.transaction?.linkedEntityId,
                   createdOn: selectedDate,
                   updatedOn: DateTime.now(),
                 );
@@ -8473,8 +8442,9 @@ bool isSavingsTransferOut(AppController state, MoneyTransaction tx) {
 bool isRecurringPaymentTransaction(AppController state, MoneyTransaction tx) {
   if (!tx.countsAsExpense) return false;
   final category = state.categoryOf(tx.categoryId)?.name.toLowerCase() ?? '';
+  final title = tx.title.toLowerCase();
   final notes = tx.notes.toLowerCase();
-  final text = '$category $notes';
+  final text = '$title $category $notes';
   const keywords = [
     'bill',
     'subscription',
@@ -10722,7 +10692,7 @@ class _BudgetEditorState extends State<BudgetEditor> {
 }
 
 // -----------------------------------------------------------------------------
-// Settings, export, backup, about
+// Settings, backup, about
 // -----------------------------------------------------------------------------
 
 class SettingsScreen extends StatelessWidget {
@@ -10744,8 +10714,6 @@ class SettingsScreen extends StatelessWidget {
             SettingsTile(icon: Icons.cloud_sync_rounded, title: 'Account & sync', subtitle: state.cloudSyncEnabled ? '${state.syncStatus} • ${state.syncAccountEmail}' : 'Sign in for multi-device sync', color: '#78D8E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MultiDeviceSyncScreen()))),
             SettingsTile(icon: Icons.system_update_alt_rounded, title: 'Updates', subtitle: state.updateStatusMessage, color: '#00D7E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const UpdatesScreen()))),
             SettingsTile(icon: Icons.filter_alt_rounded, title: 'Default date filter', subtitle: _dateRangeLabel(state.dateRangeType), color: '#B4A5FF', onTap: () => showDateRangeSheet(context)),
-            SettingsTile(icon: Icons.ios_share_rounded, title: 'Export', subtitle: 'CSV / PDF reports with current filters', color: '#FFB5D0', onTap: () => showExportSheet(context)),
-            SettingsTile(icon: Icons.file_open_rounded, title: 'Load backup', subtitle: 'Pick a .koinlybackup file and replace local data', color: '#86E3CE', onTap: () => runLoadBackupFlow(context, state)),
             SettingsTile(icon: Icons.tune_rounded, title: 'Advanced settings', subtitle: 'Defaults, performance, backup', color: '#9AD0F5', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdvancedSettingsScreen()))),
             SettingsTile(icon: Icons.info_rounded, title: 'About app', subtitle: 'Version, credits, licenses, and links', color: '#86E3CE', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AboutScreen()))),
           ],
@@ -13321,32 +13289,6 @@ class _ReminderSheetState extends State<ReminderSheet> {
         OutlinedButton.icon(onPressed: () async { final t = await pickTime(context, time); if (t != null) setState(() => time = t); }, icon: const Icon(Icons.schedule_rounded), label: Text(time.format(context))),
         const SizedBox(height: 12),
         FilledButton(onPressed: () async { await state.setReminder(enabled, time); if (context.mounted) Navigator.pop(context); }, child: const Text('Save reminder')),
-      ]),
-    );
-  }
-}
-
-void showExportSheet(BuildContext context) {
-  showKoinlyPopup<void>(context, maxWidth: 520, maxHeight: 520, child: const ExportSheet());
-}
-
-class ExportSheet extends StatelessWidget {
-  const ExportSheet({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.watch<AppController>();
-    final txs = state.filteredTransactions();
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 22, 18, 24),
-      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Text('Export report', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
-        const SizedBox(height: 8),
-        Text('${txs.length} filtered transactions will be exported with summary data.'),
-        const SizedBox(height: 14),
-        FilledButton.icon(onPressed: () => ExportService.exportCsv(state, txs), icon: const Icon(Icons.table_chart_rounded), label: const Text('Export CSV')),
-        const SizedBox(height: 10),
-        FilledButton.tonalIcon(onPressed: () => ExportService.exportPdf(state, txs), icon: const Icon(Icons.picture_as_pdf_rounded), label: const Text('Export PDF')),
       ]),
     );
   }
