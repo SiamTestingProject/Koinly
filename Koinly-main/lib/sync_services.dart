@@ -145,7 +145,7 @@ class KoinlySyncApi {
 
   Uri _uri(String path, [Map<String, String>? query]) => Uri.parse('${CloudSyncService.normalizeApiBaseUrl(baseUrl)}$path').replace(queryParameters: query);
 
-  Future<void> validateBackend() async {
+  Future<void> validateBackend({bool requireFirstUserRegistration = false}) async {
     final validatedBaseUrl = CloudSyncService.validateApiBaseUrl(baseUrl);
     try {
       final response = await http
@@ -168,6 +168,9 @@ class KoinlySyncApi {
       if (data['schemaReady'] != true || data['ok'] != true || response.statusCode < 200 || response.statusCode >= 300) {
         throw const CloudSyncException('The Worker is reachable, but its Turso schema is not ready.');
       }
+      if (requireFirstUserRegistration && data['registrationMode'] != 'first-user') {
+        throw const CloudSyncException('This Worker has managed registration keys enabled. Use a self-hosted Worker configured for first-owner registration.');
+      }
     } on TimeoutException {
       throw const CloudSyncException('Worker validation timed out. Check the URL and try again.');
     } on SocketException {
@@ -187,15 +190,34 @@ class KoinlySyncApi {
     required String deviceName,
     required String platform,
   }) async {
-    final data = await _post('/v1/auth/register', {
+    final data = await _post('/v1/auth/register', buildRegistrationPayload(
+      email: email,
+      password: password,
+      registrationKey: registrationKey,
+      deviceId: deviceId,
+      deviceName: deviceName,
+      platform: platform,
+    ));
+    return _sessionFromResponse(data, email);
+  }
+
+  static Map<String, dynamic> buildRegistrationPayload({
+    required String email,
+    required String password,
+    required String registrationKey,
+    required String deviceId,
+    required String deviceName,
+    required String platform,
+  }) {
+    final normalizedRegistrationKey = registrationKey.trim();
+    return {
       'email': email,
       'password': password,
-      'registrationKey': registrationKey,
+      if (normalizedRegistrationKey.isNotEmpty) 'registrationKey': normalizedRegistrationKey,
       'deviceId': deviceId,
       'deviceName': deviceName,
       'platform': platform,
-    });
-    return _sessionFromResponse(data, email);
+    };
   }
 
   Future<SyncAuthSession> login({

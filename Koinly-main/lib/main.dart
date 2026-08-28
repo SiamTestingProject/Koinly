@@ -2214,7 +2214,7 @@ class AppController extends ChangeNotifier {
       throw StateError('Default cloud sync is not configured in this build.');
     }
     if (useCustom) {
-      await KoinlySyncApi(baseUrl: nextApiBaseUrl).validateBackend();
+      await KoinlySyncApi(baseUrl: nextApiBaseUrl).validateBackend(requireFirstUserRegistration: true);
     }
     final endpointChanged = CloudSyncService.normalizeApiBaseUrl(cloudSyncApiBaseUrl) != nextApiBaseUrl;
     if (endpointChanged && cloudSyncEnabled) {
@@ -2259,7 +2259,7 @@ class AppController extends ChangeNotifier {
           ? await api.register(
               email: email,
               password: password,
-              registrationKey: registrationKey,
+              registrationKey: useCustomCloudSync ? '' : registrationKey,
               deviceId: syncDeviceId,
               deviceName: _deviceName(),
               platform: _platformName(),
@@ -11346,15 +11346,20 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
 
   Future<void> _login({required bool register}) async {
     final state = context.read<AppController>();
-    if (state.cloudSyncApiBaseUrl.trim().isEmpty) {
-      showSnack(context, 'Choose a configured cloud sync service first.');
+    if (!_isSelectedEndpointActive(state)) {
+      showSnack(
+        context,
+        _useCustomCloudSync
+            ? 'Validate and use the self-hosted Worker first.'
+            : 'Use the default cloud sync service first.',
+      );
       return;
     }
     if (_emailController.text.trim().isEmpty || _passwordController.text.isEmpty) {
       showSnack(context, 'Enter email and password.');
       return;
     }
-    if (register && !state.useCustomCloudSync && _registrationKeyController.text.trim().isEmpty) {
+    if (register && !_useCustomCloudSync && _registrationKeyController.text.trim().isEmpty) {
       showSnack(context, 'Enter your registration key.');
       return;
     }
@@ -11362,7 +11367,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
       await state.registerSyncAccount(
         email: _emailController.text,
         password: _passwordController.text,
-        registrationKey: _registrationKeyController.text,
+        registrationKey: _useCustomCloudSync ? '' : _registrationKeyController.text,
       );
     } else {
       await state.loginSyncAccount(email: _emailController.text, password: _passwordController.text, preferCloudData: widget.preferCloudDataOnAuth);
@@ -11413,13 +11418,21 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
     showSnack(context, state.cloudSyncError == null ? successMessage : state.cloudSyncError!);
   }
 
+  bool _isSelectedEndpointActive(AppController state) {
+    if (_useCustomCloudSync != state.useCustomCloudSync) return false;
+    final activeUrl = CloudSyncService.normalizeApiBaseUrl(state.cloudSyncApiBaseUrl);
+    if (!_useCustomCloudSync) return activeUrl.isNotEmpty;
+    final selectedUrl = CloudSyncService.normalizeApiBaseUrl(_customApiBaseUrlController.text);
+    return selectedUrl.isNotEmpty && selectedUrl == activeUrl;
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppController>();
     final signedIn = state.cloudSyncEnabled && state.syncAccountEmail.isNotEmpty;
     final busy = state.cloudSyncOperationBusy || _endpointBusy;
     final uploadButtonLabel = state.authoritativeCloudUploadPending ? 'Upload restored data' : 'Upload local changes';
-    final backendConfigured = state.cloudSyncApiBaseUrl.trim().isNotEmpty;
+    final backendConfigured = _isSelectedEndpointActive(state);
     return PageScaffold(
       title: 'Account & sync',
       subtitle: signedIn ? state.syncAccountEmail : 'Multi-device online sync',
@@ -11440,7 +11453,12 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                       ButtonSegment(value: true, icon: Icon(Icons.dns_rounded), label: Text('Self-hosted')),
                     ],
                     selected: {_useCustomCloudSync},
-                    onSelectionChanged: busy ? null : (selection) => setState(() => _useCustomCloudSync = selection.first),
+                    onSelectionChanged: busy
+                        ? null
+                        : (selection) => setState(() {
+                              _useCustomCloudSync = selection.first;
+                              if (_useCustomCloudSync) _registrationKeyController.clear();
+                            }),
                   ),
                   if (_useCustomCloudSync) ...[
                     const SizedBox(height: 12),
@@ -11450,6 +11468,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                       keyboardType: TextInputType.url,
                       autocorrect: false,
                       enableSuggestions: false,
+                      onChanged: (_) => setState(() {}),
                       decoration: const InputDecoration(
                         labelText: 'Cloudflare Worker URL',
                         hintText: 'https://my-sync.example.workers.dev',
@@ -11537,7 +11556,7 @@ class _MultiDeviceSyncScreenState extends State<MultiDeviceSyncScreen> {
                   ),
                 ),
               ),
-            if (!signedIn && _registerMode && !state.useCustomCloudSync) ...[
+            if (!signedIn && _registerMode && !_useCustomCloudSync) ...[
               const SizedBox(height: 12),
               TextField(
                 controller: _registrationKeyController,

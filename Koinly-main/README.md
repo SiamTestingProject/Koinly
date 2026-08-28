@@ -196,7 +196,7 @@ unavailable.
 
 ```bash
 flutter build apk --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.76 \
+  --dart-define=KOINLY_APP_VERSION=1.0.77 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -208,7 +208,7 @@ or test builds; see [Android signing](#android-signing).
 
 ```bash
 flutter build windows --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.76 \
+  --dart-define=KOINLY_APP_VERSION=1.0.77 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -232,6 +232,7 @@ Koinly accepts a custom endpoint only when:
 - it contains no path, query, or fragment;
 - `GET /health` identifies the service as `koinly-sync`;
 - the Worker reports that its required configuration is present;
+- the Worker reports `first-user` registration mode for self-hosted use;
 - Turso is reachable; and
 - the database schema is ready.
 

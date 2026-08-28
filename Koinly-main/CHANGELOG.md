@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.77] - 2026-08-28
+
+### Fixed
+
+- Self-hosted account creation now removes the Registration Key field as soon
+  as Self-hosted is selected and never includes a registration key in the
+  request payload.
+- Self-hosted endpoints must report first-owner registration mode before the
+  app accepts them, and authentication stays disabled until the selected
+  endpoint is validated.
+
 ## [1.0.76] - 2026-08-28
 
 ### Changed
@@ -77,7 +88,9 @@
 - Android release signing now requires injected keystore secrets; the release keystore and passwords are no longer stored in source.
 - Removed the obsolete debt-tracking and device-lock modules from the application UI, models, notifications, and dependencies.
 
-- The Create account form now requires a Registration Key and always relies on backend validation; Telegram tokens, chat IDs, and administrator credentials remain deployment secrets.
+- The default-service Create account form now requires a Registration Key and
+  relies on backend validation; self-hosted registration uses the first-owner
+  flow without a key.
 - Added a Pursenal-style Load backup workflow in Settings that opens a file picker, loads a `.koinlybackup` file, replaces local data, and triggers the existing cloud-upload path when signed in.
 - Android package/application ID changed from `com.siamapps.koinly` to `com.koinly.siam`.
 - Transaction amount entry now uses the normal phone/desktop keyboard instead of Koinly's old custom on-screen keypad.
