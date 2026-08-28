@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.0.1040] - 2026-08-28
+
+### Added
+
+- Added a complete lending and borrowing tracker with contacts, due dates,
+  notes, repayment history, statuses, and Home summary totals.
+- Added no-interest, simple-interest, flat-interest, and compound-interest
+  calculations using a consistent annual percentage rate, with optional
+  installment estimates and interest-first repayment allocation.
+- Added optional account-linked disbursal and repayment movements, due-date
+  reminders, backup and sync coverage, and loan-specific data-health checks.
+- Added focused tests for repayment calculations, due-date behavior, APR
+  semantics, and report exclusions.
+
+### Changed
+
+- Loan-linked account movements update account balances but are excluded from
+  income, expense, budget, and cash-flow reporting.
+
+## [1.0.1039] - 2026-08-28
+
+### Changed
+
+- Removed the extra overview badge from the Home balance summary and tightened
+  the surrounding layout.
+
 ## [1.0.1038] - 2026-08-28
 
 ### Changed

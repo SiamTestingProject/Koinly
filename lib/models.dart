@@ -257,6 +257,9 @@ class MoneyTransaction {
     required this.fromAccountId,
     this.toAccountId,
     this.imagePath = '',
+    this.excludeFromReports = false,
+    this.linkedEntityType,
+    this.linkedEntityId,
     required this.createdOn,
     required this.updatedOn,
   });
@@ -269,11 +272,14 @@ class MoneyTransaction {
   final String fromAccountId;
   final String? toAccountId;
   final String imagePath;
+  final bool excludeFromReports;
+  final String? linkedEntityType;
+  final String? linkedEntityId;
   final DateTime createdOn;
   final DateTime updatedOn;
 
-  bool get countsAsIncome => type == MoneyTransactionType.income;
-  bool get countsAsExpense => type == MoneyTransactionType.expense;
+  bool get countsAsIncome => !excludeFromReports && type == MoneyTransactionType.income;
+  bool get countsAsExpense => !excludeFromReports && type == MoneyTransactionType.expense;
   String get displayType => enumName(type);
 
   MoneyTransaction copyWith({
@@ -285,6 +291,9 @@ class MoneyTransaction {
     String? fromAccountId,
     String? toAccountId,
     String? imagePath,
+    bool? excludeFromReports,
+    String? linkedEntityType,
+    String? linkedEntityId,
     DateTime? createdOn,
     DateTime? updatedOn,
   }) => MoneyTransaction(
@@ -296,6 +305,9 @@ class MoneyTransaction {
         fromAccountId: fromAccountId ?? this.fromAccountId,
         toAccountId: toAccountId ?? this.toAccountId,
         imagePath: imagePath ?? this.imagePath,
+        excludeFromReports: excludeFromReports ?? this.excludeFromReports,
+        linkedEntityType: linkedEntityType ?? this.linkedEntityType,
+        linkedEntityId: linkedEntityId ?? this.linkedEntityId,
         createdOn: createdOn ?? this.createdOn,
         updatedOn: updatedOn ?? this.updatedOn,
       );
@@ -309,6 +321,9 @@ class MoneyTransaction {
         'from_account_id': fromAccountId,
         'to_account_id': toAccountId,
         'image_path': imagePath,
+        'exclude_from_reports': excludeFromReports ? 1 : 0,
+        'linked_entity_type': linkedEntityType,
+        'linked_entity_id': linkedEntityId,
         'created_on': dateToDb(createdOn),
         'updated_on': dateToDb(updatedOn),
       };
@@ -322,6 +337,9 @@ class MoneyTransaction {
         fromAccountId: map['from_account_id'] as String? ?? '',
         toAccountId: map['to_account_id'] as String?,
         imagePath: map['image_path'] as String? ?? '',
+        excludeFromReports: (map['exclude_from_reports'] as num? ?? 0).toInt() == 1,
+        linkedEntityType: map['linked_entity_type'] as String?,
+        linkedEntityId: map['linked_entity_id'] as String?,
         createdOn: dateFromDb(map['created_on']),
         updatedOn: dateFromDb(map['updated_on']),
       );
@@ -422,6 +440,8 @@ class DataHealthReport {
     required this.categoryCount,
     required this.transactionCount,
     required this.budgetCount,
+    required this.loanCount,
+    required this.loanPaymentCount,
     required this.pendingSyncOperations,
     required this.openSyncConflicts,
     required this.skippedStarterPlaceholdersVisible,
@@ -433,6 +453,8 @@ class DataHealthReport {
   final int categoryCount;
   final int transactionCount;
   final int budgetCount;
+  final int loanCount;
+  final int loanPaymentCount;
   final int pendingSyncOperations;
   final int openSyncConflicts;
   final bool skippedStarterPlaceholdersVisible;

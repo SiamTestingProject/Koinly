@@ -32,8 +32,8 @@
 
 ## Overview
 
-Koinly helps users manage accounts, transactions, budgets, categories,
-reports, and backups without requiring an online account. Finance data is
+Koinly helps users manage accounts, transactions, budgets, lending and
+borrowing, categories, reports, and backups without requiring an online account. Finance data is
 written to SQLite on the device first, so normal app use remains available
 without an internet connection.
 
@@ -55,6 +55,8 @@ selected sync service only through HTTPS requests to a Cloudflare Worker.
 - Income, expense, and transfer transactions
 - Custom income and expense categories
 - Monthly budgets with progress tracking
+- Lending and borrowing records with contacts, repayments, due dates, and APR-based interest
+- Optional account movements for loan activity without counting them as income or expense
 - Cash-flow trends, category breakdowns, and financial summaries
 - Search, date filters, and account/category filters
 - Savings suggestions and planning tools
@@ -165,7 +167,7 @@ unavailable.
 
 ```bash
 flutter build apk --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1038 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1040 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -177,7 +179,7 @@ or test builds; see [Android signing](#android-signing).
 
 ```bash
 flutter build windows --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1038 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1040 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 

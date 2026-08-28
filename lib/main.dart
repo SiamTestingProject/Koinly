@@ -33,12 +33,19 @@ import 'branding_widgets.dart';
 import 'collection_utils.dart';
 import 'icon_helpers.dart';
 import 'models.dart';
+import 'loans/loan_computation.dart';
+import 'loans/loan_models.dart';
+import 'loans/loan_repository.dart';
 import 'persistence_stores.dart';
 import 'reminder_service.dart';
 import 'sync_models.dart';
 import 'sync_services.dart';
 import 'ui_foundation.dart';
 import 'update_service.dart';
+
+part 'loans/loan_controller_part.dart';
+part 'loans/loan_screens.dart';
+part 'loans/loan_sheets.dart';
 
 const _uuid = Uuid();
 
@@ -88,16 +95,18 @@ class KoinlyDatabase {
     final path = p.join(dir, 'koinly_flutter.db');
     _db = await sql.openDatabase(
       path,
-      version: 6,
+      version: 7,
       onCreate: (database, version) async {
         await _createSchema(database);
         await _seed(database);
       },
       onUpgrade: (database, oldVersion, newVersion) async {
         await _createSchema(database);
+        await _ensureTransactionMetadataColumns(database);
       },
       onOpen: (database) async {
         await _createSchema(database);
+        await _ensureTransactionMetadataColumns(database);
       },
     );
     return _db!;
@@ -139,10 +148,16 @@ class KoinlyDatabase {
         from_account_id TEXT NOT NULL,
         to_account_id TEXT,
         image_path TEXT NOT NULL DEFAULT '',
+        exclude_from_reports INTEGER NOT NULL DEFAULT 0,
+        linked_entity_type TEXT,
+        linked_entity_id TEXT,
         created_on INTEGER NOT NULL,
         updated_on INTEGER NOT NULL
       )
     ''');
+    // Existing databases can reach this method before onUpgrade's follow-up
+    // migration runs. Add the columns before creating their index below.
+    await _ensureTransactionMetadataColumns(database);
     await database.execute('''
       CREATE TABLE IF NOT EXISTS budgets(
         id TEXT PRIMARY KEY,
@@ -166,6 +181,54 @@ class KoinlyDatabase {
         budget_id TEXT NOT NULL,
         category_id TEXT NOT NULL,
         PRIMARY KEY(budget_id, category_id)
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS loan_contacts(
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        phone TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        icon_name TEXT NOT NULL DEFAULT 'exchange',
+        icon_color TEXT NOT NULL DEFAULT '#FBC879',
+        archived INTEGER NOT NULL DEFAULT 0,
+        created_on INTEGER NOT NULL,
+        updated_on INTEGER NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS loans(
+        id TEXT PRIMARY KEY,
+        contact_id TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        principal REAL NOT NULL,
+        interest_type TEXT NOT NULL DEFAULT 'none',
+        interest_rate REAL NOT NULL DEFAULT 0,
+        interest_period TEXT NOT NULL DEFAULT 'yearly',
+        start_date INTEGER NOT NULL,
+        due_date INTEGER,
+        installment_count INTEGER,
+        interest_accrual_stop TEXT NOT NULL DEFAULT 'settled',
+        note TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active',
+        closed_on INTEGER,
+        disbursal_transaction_id TEXT,
+        created_on INTEGER NOT NULL,
+        updated_on INTEGER NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS loan_payments(
+        id TEXT PRIMARY KEY,
+        loan_id TEXT NOT NULL,
+        amount REAL NOT NULL,
+        interest_component REAL NOT NULL DEFAULT 0,
+        principal_component REAL NOT NULL DEFAULT 0,
+        paid_on INTEGER NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        transaction_id TEXT,
+        created_on INTEGER NOT NULL,
+        updated_on INTEGER NOT NULL
       )
     ''');
     await database.execute('''
@@ -210,6 +273,26 @@ class KoinlyDatabase {
     ''');
     await database.execute('CREATE INDEX IF NOT EXISTS idx_sync_outbox_created ON sync_outbox(created_at)');
     await database.execute('CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open ON sync_conflicts(resolved_at, created_at)');
+    await database.execute('CREATE INDEX IF NOT EXISTS idx_loans_contact ON loans(contact_id)');
+    await database.execute('CREATE INDEX IF NOT EXISTS idx_loans_status_due ON loans(status, due_date)');
+    await database.execute('CREATE INDEX IF NOT EXISTS idx_loan_payments_loan ON loan_payments(loan_id, paid_on)');
+    await database.execute('CREATE INDEX IF NOT EXISTS idx_loan_contacts_name ON loan_contacts(name COLLATE NOCASE)');
+    await database.execute('CREATE INDEX IF NOT EXISTS idx_transactions_linked_entity ON transactions(linked_entity_type, linked_entity_id)');
+  }
+
+  Future<void> _ensureTransactionMetadataColumns(sql.Database database) async {
+    final columns = (await database.rawQuery('PRAGMA table_info(transactions)'))
+        .map((row) => row['name']?.toString() ?? '')
+        .toSet();
+    if (!columns.contains('exclude_from_reports')) {
+      await database.execute('ALTER TABLE transactions ADD COLUMN exclude_from_reports INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!columns.contains('linked_entity_type')) {
+      await database.execute('ALTER TABLE transactions ADD COLUMN linked_entity_type TEXT');
+    }
+    if (!columns.contains('linked_entity_id')) {
+      await database.execute('ALTER TABLE transactions ADD COLUMN linked_entity_id TEXT');
+    }
   }
 
   Future<void> _seed(sql.Database database) async {
@@ -308,7 +391,8 @@ class KoinlyDatabase {
           SELECT
             (SELECT COUNT(*) FROM transactions) +
             (SELECT COUNT(*) FROM budgets) +
-            (SELECT COUNT(*) FROM budget_accounts)
+            (SELECT COUNT(*) FROM budget_accounts) +
+            (SELECT COUNT(*) FROM loans)
           ''',
         )) ??
         0;
@@ -440,7 +524,7 @@ class KoinlyDatabase {
 
   Future<Map<String, dynamic>> exportAll() async {
     final database = await db;
-    final tables = ['accounts', 'categories', 'transactions', 'budgets', 'budget_accounts', 'budget_categories'];
+    final tables = ['accounts', 'categories', 'transactions', 'budgets', 'budget_accounts', 'budget_categories', 'loan_contacts', 'loans', 'loan_payments'];
     final data = <String, dynamic>{};
     for (final table in tables) {
       data[table] = await database.query(table);
@@ -450,7 +534,7 @@ class KoinlyDatabase {
 
   Future<void> importAll(Map<String, dynamic> data) async {
     final database = await db;
-    final tables = ['budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
+    final tables = ['loan_payments', 'loans', 'loan_contacts', 'budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
     await database.transaction((txn) async {
       for (final table in tables) {
         await txn.delete(table);
@@ -467,7 +551,7 @@ class KoinlyDatabase {
 
   Future<bool> hasLocalUserActivity() async {
     final database = await db;
-    for (final table in ['transactions', 'budgets']) {
+    for (final table in ['transactions', 'budgets', 'loans']) {
       final rows = await database.query(table, columns: ['COUNT(*) AS count']);
       if ((rows.first['count'] as num? ?? 0).toInt() > 0) return true;
     }
@@ -476,7 +560,7 @@ class KoinlyDatabase {
 
   Future<void> clearFinanceDataForRemoteLogin() async {
     final database = await db;
-    final tables = ['budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
+    final tables = ['loan_payments', 'loans', 'loan_contacts', 'budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
     await database.transaction((txn) async {
       for (final table in tables) {
         await txn.delete(table);
@@ -494,6 +578,9 @@ class KoinlyDatabase {
     'budgets',
     'budget_accounts',
     'budget_categories',
+    'loan_contacts',
+    'loans',
+    'loan_payments',
   ];
 
   Future<String> readSyncState(String key, [String fallback = '']) async {
@@ -694,6 +781,9 @@ class KoinlyDatabase {
             await txn.delete('budget_accounts', where: 'budget_id = ?', whereArgs: [entityId]);
             await txn.delete('budget_categories', where: 'budget_id = ?', whereArgs: [entityId]);
           }
+          if (entityType == 'loans') {
+            await txn.delete('loan_payments', where: 'loan_id = ?', whereArgs: [entityId]);
+          }
           await txn.delete(entityType, where: _whereForEntity(entityType), whereArgs: _whereArgsForEntity(entityType, entityId));
         } else {
           final payload = (change['payload'] as Map? ?? {}).cast<String, Object?>();
@@ -864,7 +954,7 @@ class BackupService {
   static Future<File> createBackup(AppController state) async {
     final dir = await getTemporaryDirectory();
     final payload = {
-      'version': 4,
+      'version': 5,
       'created_at': DateTime.now().toIso8601String(),
       'database': await state.database.exportAll(),
       'preferences': await state.exportPreferences(),
@@ -877,7 +967,7 @@ class BackupService {
   static Future<File> createSafetyBackup(AppController state, {required String reason}) async {
     final backupsDir = await backupStorageDirectory();
     final payload = {
-      'version': 4,
+      'version': 5,
       'backup_type': 'safety',
       'reason': reason,
       'created_at': DateTime.now().toIso8601String(),
@@ -1094,6 +1184,10 @@ class AppController extends ChangeNotifier {
   List<Category> categories = [];
   List<MoneyTransaction> transactions = [];
   List<Budget> budgets = [];
+  LoanRepository? _loanRepository;
+  List<LoanContact> loanContacts = [];
+  List<Loan> loans = [];
+  List<LoanPayment> loanPayments = [];
   SavingsSuggestionProfile savingsSuggestionProfile = SavingsSuggestionProfile.empty;
   List<String> savedSavingsIdeas = [];
   List<String> plannedSavingsIdeas = [];
@@ -1101,6 +1195,9 @@ class AppController extends ChangeNotifier {
   List<String> dismissedFinancialHealthSummaryKeys = [];
   Map<String, Account> _accountsById = {};
   Map<String, Category> _categoriesById = {};
+  Map<String, LoanContact> _loanContactsById = {};
+  Map<String, Loan> _loansById = {};
+  Map<String, List<LoanPayment>> _paymentsByLoan = {};
   Map<CategoryType, Set<String>> _categoryIdsByType = {
     CategoryType.income: <String>{},
     CategoryType.expense: <String>{},
@@ -1130,6 +1227,9 @@ class AppController extends ChangeNotifier {
   bool reducedMotion = kIsDesktopApp;
   bool reminderEnabled = false;
   TimeOfDay reminderTime = const TimeOfDay(hour: 21, minute: 0);
+  bool loanRecordTransactionsByDefault = true;
+  bool loanRemindersEnabled = true;
+  bool loanShowWrittenOff = false;
   bool cloudSyncEnabled = false;
   SyncDatabaseProvider syncDatabaseProvider = SyncDatabaseProvider.mongoDb;
   bool useCustomCloudSync = false;
@@ -1244,6 +1344,9 @@ class AppController extends ChangeNotifier {
     final hour = await prefs.getInt('reminderHour', 21);
     final minute = await prefs.getInt('reminderMinute', 0);
     reminderTime = TimeOfDay(hour: hour, minute: minute);
+    loanRecordTransactionsByDefault = await prefs.getBool('loanRecordTransactionsByDefault', true);
+    loanRemindersEnabled = await prefs.getBool('loanRemindersEnabled', true);
+    loanShowWrittenOff = await prefs.getBool('loanShowWrittenOff', false);
     cloudSyncEnabled = await prefs.getBool('cloudSyncEnabled', false);
     syncDatabaseProvider = await prefs.getEnum('syncDatabaseProvider', SyncDatabaseProvider.values, SyncDatabaseProvider.mongoDb);
     if (!userSyncDatabaseProviders.contains(syncDatabaseProvider)) {
@@ -1350,6 +1453,8 @@ class AppController extends ChangeNotifier {
       final items = <DataHealthItem>[];
       final accountIds = accounts.map((account) => account.id).toSet();
       final categoryIds = categories.map((category) => category.id).toSet();
+      final loanContactIds = loanContacts.map((contact) => contact.id).toSet();
+      final loanIds = loans.map((loan) => loan.id).toSet();
 
       var missingAccountReferences = 0;
       var missingCategoryReferences = 0;
@@ -1374,6 +1479,13 @@ class AppController extends ChangeNotifier {
           invalidBudgetScopes += 1;
         }
       }
+
+      final missingLoanContacts = loans.where((loan) => !loanContactIds.contains(loan.contactId)).length;
+      final missingPaymentLoans = loanPayments.where((payment) => !loanIds.contains(payment.loanId)).length;
+      final inconsistentPaymentSplits = loanPayments
+          .where((payment) => (payment.amount - payment.interestComponent - payment.principalComponent).abs() >= 0.005)
+          .length;
+      final severelyOverdueLoans = loans.where((loan) => computationFor(loan.id).daysOverdue > 30).length;
 
       final pendingSyncOperations = await database.pendingSyncOperationCount();
       final openSyncConflicts = await database.openSyncConflictCount();
@@ -1414,6 +1526,34 @@ class AppController extends ChangeNotifier {
           body: '$invalidBudgetScopes budget account/category selection${invalidBudgetScopes == 1 ? '' : 's'} include missing records.',
         ));
       }
+      if (missingLoanContacts > 0) {
+        items.add(DataHealthItem(
+          severity: DataHealthSeverity.error,
+          title: 'Missing people',
+          body: '$missingLoanContacts record${missingLoanContacts == 1 ? '' : 's'} point to a person that no longer exists.',
+        ));
+      }
+      if (missingPaymentLoans > 0) {
+        items.add(DataHealthItem(
+          severity: DataHealthSeverity.error,
+          title: 'Orphaned repayments',
+          body: '$missingPaymentLoans repayment${missingPaymentLoans == 1 ? '' : 's'} point to a missing record.',
+        ));
+      }
+      if (inconsistentPaymentSplits > 0) {
+        items.add(DataHealthItem(
+          severity: DataHealthSeverity.warning,
+          title: 'Repayment split mismatch',
+          body: '$inconsistentPaymentSplits repayment${inconsistentPaymentSplits == 1 ? '' : 's'} have inconsistent interest and principal amounts.',
+        ));
+      }
+      if (severelyOverdueLoans > 0) {
+        items.add(DataHealthItem(
+          severity: DataHealthSeverity.warning,
+          title: 'Long-overdue records',
+          body: '$severelyOverdueLoans active record${severelyOverdueLoans == 1 ? ' is' : 's are'} more than 30 days overdue.',
+        ));
+      }
       if (openSyncConflicts > 0) {
         items.add(DataHealthItem(
           severity: DataHealthSeverity.error,
@@ -1444,6 +1584,8 @@ class AppController extends ChangeNotifier {
         categoryCount: categories.length,
         transactionCount: transactions.length,
         budgetCount: budgets.length,
+        loanCount: loans.length,
+        loanPaymentCount: loanPayments.length,
         pendingSyncOperations: pendingSyncOperations,
         openSyncConflicts: openSyncConflicts,
         skippedStarterPlaceholdersVisible: skippedStarterPlaceholdersVisible,
@@ -1498,6 +1640,8 @@ class AppController extends ChangeNotifier {
       ..writeln('- Visible categories: ${report.categoryCount}')
       ..writeln('- Transactions: ${report.transactionCount}')
       ..writeln('- Budgets: ${report.budgetCount}')
+      ..writeln('- Lending and borrowing records: ${report.loanCount}')
+      ..writeln('- Repayments: ${report.loanPaymentCount}')
       ..writeln('- Last safety backup: ${lastSafetyBackupAt?.toIso8601String() ?? 'none'}')
       ..writeln('')
       ..writeln('Sync')
@@ -1556,6 +1700,9 @@ class AppController extends ChangeNotifier {
         'reminderEnabled': reminderEnabled,
         'reminderHour': reminderTime.hour,
         'reminderMinute': reminderTime.minute,
+        'loanRecordTransactionsByDefault': loanRecordTransactionsByDefault,
+        'loanRemindersEnabled': loanRemindersEnabled,
+        'loanShowWrittenOff': loanShowWrittenOff,
         'syncDatabaseProvider': enumName(syncDatabaseProvider),
         'syncMongoDatabaseName': syncMongoDatabaseName,
         'syncMongoCollectionName': syncMongoCollectionName,
@@ -2599,17 +2746,30 @@ class AppController extends ChangeNotifier {
     categories = await database.categories();
     transactions = await database.transactions();
     budgets = await database.budgets();
+    loanContacts = await loanRepository.contacts(includeArchived: true);
+    loans = await loanRepository.loans();
+    loanPayments = await loanRepository.payments();
     _rebuildLookupCaches();
     defaultAccountId ??= accounts.where((a) => a.type != AccountType.savings).firstOrNull?.id ?? accounts.firstOrNull?.id;
     defaultExpenseCategoryId ??= categories.where((c) => c.type == CategoryType.expense).firstOrNull?.id;
     defaultIncomeCategoryId ??= categories.where((c) => c.type == CategoryType.income).firstOrNull?.id;
     notifyListeners();
+    unawaited(refreshLoanReminders());
     if (queueSync) queueCloudSync();
   }
 
   void _rebuildLookupCaches() {
     _accountsById = {for (final account in accounts) account.id: account};
     _categoriesById = {for (final category in categories) category.id: category};
+    _loanContactsById = {for (final contact in loanContacts) contact.id: contact};
+    _loansById = {for (final loan in loans) loan.id: loan};
+    _paymentsByLoan = {for (final loan in loans) loan.id: <LoanPayment>[]};
+    for (final payment in loanPayments) {
+      _paymentsByLoan.putIfAbsent(payment.loanId, () => <LoanPayment>[]).add(payment);
+    }
+    for (final payments in _paymentsByLoan.values) {
+      payments.sort((a, b) => a.paidOn.compareTo(b.paidOn));
+    }
     _operatingAccounts = accounts.where((a) => a.type != AccountType.savings).toList(growable: false);
     _savingAccounts = accounts.where((a) => a.type == AccountType.savings).toList(growable: false);
     _operatingAccountBalance = _operatingAccounts.fold<double>(0, (sum, account) => sum + account.amount);
@@ -3631,6 +3791,7 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
       final controller = context.read<AppController>();
       unawaited(controller.resumePendingAndroidInstallIfAllowed());
       unawaited(controller.syncCloudChangesIfIdle(force: true));
+      unawaited(controller.refreshLoanReminders());
     }
   }
 
@@ -5352,6 +5513,24 @@ class HomeDashboardScreen extends StatelessWidget {
       ),
     ];
 
+    final loanOverview = state.loanSummary;
+    final loanSubtitleParts = <String>[
+      if (loanOverview.collectorCount > 0) '${loanOverview.collectorCount} ${loanOverview.collectorCount == 1 ? 'person owes' : 'people owe'} you',
+      if (loanOverview.debtorCount > 0) 'you owe ${loanOverview.debtorCount}',
+      if (loanOverview.overdueCount > 0) '${loanOverview.overdueCount} overdue',
+    ];
+    final loansSection = <Widget>[
+      const SectionHeader('Loans'),
+      HomeNavigationTile(
+        iconName: 'exchange',
+        iconColor: '#FBC879',
+        title: 'Loans',
+        subtitle: loanSubtitleParts.isEmpty ? 'No active loans' : loanSubtitleParts.join(' · '),
+        amount: _signedLoanAmount(state, loanOverview.net),
+        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LoansScreen())),
+      ),
+    ];
+
     final budgetSection = <Widget>[
       SectionHeader('Budgets', trailing: TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetListScreen())), child: const Text('View all'))),
       if (state.budgets.isEmpty)
@@ -5454,6 +5633,7 @@ class HomeDashboardScreen extends StatelessWidget {
                   balanceCard,
                   ...startEmptySection,
                   ...accountsSection,
+                  ...loansSection,
                   ...budgetSection,
                   ...categorySection,
                 ],
@@ -5471,6 +5651,7 @@ class HomeDashboardScreen extends StatelessWidget {
                       balanceCard,
                           ...startEmptySection,
                       ...accountsSection,
+                      ...loansSection,
                       ...budgetSection,
                     ],
                   ),
@@ -5796,19 +5977,6 @@ class BalanceHeroCard extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(subtitle, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: subtitleColor, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: kSleekIncome.withOpacity(dark ? .13 : .10),
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(color: kSleekIncome.withOpacity(.18)),
-            ),
-            child: Text(
-              'Local-first overview',
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(color: kSleekIncome, fontWeight: FontWeight.w900),
-            ),
-          ),
           const SizedBox(height: 16),
           const _DecorativeSparkline(),
           const SizedBox(height: 18),
@@ -13377,6 +13545,14 @@ class _DataHealthScreenState extends State<DataHealthScreen> {
                   Expanded(child: MiniMetric('Categories', '${report.categoryCount}', Icons.category_rounded)),
                   const SizedBox(width: 10),
                   Expanded(child: MiniMetric('Budgets', '${report.budgetCount}', Icons.savings_rounded)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(child: MiniMetric('Records', '${report.loanCount}', Icons.currency_exchange_rounded)),
+                  const SizedBox(width: 10),
+                  Expanded(child: MiniMetric('Repayments', '${report.loanPaymentCount}', Icons.payments_rounded)),
                 ],
               ),
               const SizedBox(height: 10),
