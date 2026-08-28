@@ -4,9 +4,42 @@ Cloudflare Worker backend for Koinly multi-device sync. The app talks to the
 Worker, while Turso credentials remain in encrypted Worker secrets and never
 ship inside the app.
 
-## Required configuration
+## Deployment workflows
 
-GitHub Actions deployment requires these repository secrets:
+The repository keeps user and owner deployments separate:
+
+- **Deploy User Self-Hosted Sync Worker** is the fork-friendly workflow. It
+  runs manually or when Worker files change on `main`/`master`.
+- **Deploy Owner Default Sync Worker** is manual-only and deploys the managed
+  default service with invite-key registration and Telegram key delivery.
+
+Both workflows reuse this Worker implementation while deploying independent
+Cloudflare Workers and Turso databases.
+
+## User self-hosted configuration
+
+The user workflow requires these repository values:
+
+```text
+CLOUDFLARE_NAME_U
+CLOUDFLARE_API_TOKEN_U
+CLOUDFLARE_ACCOUNT_ID_U
+TURSO_DATABASE_URL_U
+TURSO_AUTH_TOKEN_U
+JWT_SECRET_U
+```
+
+`JWT_SECRET_U` must contain at least 32 characters. Self-hosted deployments do
+not require `REGISTRATION_ADMIN_SECRET`, `REGISTRATION_KEY_CHAT_ID`, or
+`TELEGRAM_BOT_TOKEN`; those are reserved for the managed default service.
+
+The workflow applies `schema.sql`, uploads the Turso and JWT values as
+Cloudflare Worker secrets, deploys using `CLOUDFLARE_NAME_U`, and verifies the
+deployed `/health` endpoint in `first-user` registration mode.
+
+## Owner/default-service configuration
+
+The owner workflow keeps the existing unprefixed GitHub values:
 
 ```text
 CLOUDFLARE_NAME
@@ -15,17 +48,21 @@ CLOUDFLARE_ACCOUNT_ID
 TURSO_DATABASE_URL
 TURSO_AUTH_TOKEN
 JWT_SECRET
+TELEGRAM_BOT_TOKEN
+REGISTRATION_KEY_CHAT_ID
+REGISTRATION_ADMIN_SECRET
 ```
 
-`JWT_SECRET` must contain at least 32 characters. Self-hosted deployments do
-not require `REGISTRATION_ADMIN_SECRET`, `REGISTRATION_KEY_CHAT_ID`, or
-`TELEGRAM_BOT_TOKEN`; those are reserved for the managed default service.
+`JWT_SECRET` and `REGISTRATION_ADMIN_SECRET` must each contain at
+least 32 characters and must be different. The workflow validates the values,
+deploys in `invite-key` mode, creates an active registration key, and confirms
+Telegram delivery. Fork users do not need these owner values.
 
-The workflow applies `schema.sql`, uploads the Turso and JWT values as
-Cloudflare Worker secrets, deploys using `CLOUDFLARE_NAME`, and verifies the
-deployed `/health` endpoint.
+Only user self-hosted GitHub configuration uses the `_U` suffix. The user
+workflow maps those values to the standard Worker runtime names; the owner
+workflow uses the unprefixed names directly.
 
-## Registration
+## User self-hosted registration
 
 A new self-hosted backend accepts one owner account without a registration
 key. Registration closes after that account is created. Additional devices

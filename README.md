@@ -196,7 +196,7 @@ unavailable.
 
 ```bash
 flutter build apk --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.73 \
+  --dart-define=KOINLY_APP_VERSION=1.0.76 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -208,7 +208,7 @@ or test builds; see [Android signing](#android-signing).
 
 ```bash
 flutter build windows --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.73 \
+  --dart-define=KOINLY_APP_VERSION=1.0.76 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -252,7 +252,7 @@ The recommended deployment path is deliberately simple:
 Fork repository
   -> create Turso database
   -> add GitHub configuration
-  -> run Deploy Sync Worker
+  -> run Deploy User Self-Hosted Sync Worker
   -> copy workers.dev URL
   -> validate URL in Koinly
   -> create the first owner account
@@ -308,7 +308,7 @@ permissions. They are not needed for a normal `workers.dev` deployment.
 Example:
 
 ```ini
-CLOUDFLARE_NAME=my-koinly-sync
+CLOUDFLARE_NAME_U=my-koinly-sync
 ```
 
 The name must contain 1-63 lowercase letters, numbers, or internal dashes. It
@@ -332,14 +332,14 @@ Add these values:
 
 | Name | Store as | Purpose |
 | --- | --- | --- |
-| `CLOUDFLARE_NAME` | Secret or variable | Worker name passed to Wrangler |
-| `CLOUDFLARE_API_TOKEN` | Secret | Deploys and inspects the Worker |
-| `CLOUDFLARE_ACCOUNT_ID` | Secret | Selects the Cloudflare account |
-| `TURSO_DATABASE_URL` | Secret | Connects the Worker to Turso |
-| `TURSO_AUTH_TOKEN` | Secret | Authorizes Turso reads and writes |
-| `JWT_SECRET` | Secret | Protects passwords and signs sessions |
+| `CLOUDFLARE_NAME_U` | Secret or variable | User Worker name passed to Wrangler |
+| `CLOUDFLARE_API_TOKEN_U` | Secret | Deploys and inspects the user Worker |
+| `CLOUDFLARE_ACCOUNT_ID_U` | Secret | Selects the user's Cloudflare account |
+| `TURSO_DATABASE_URL_U` | Secret | Connects the user Worker to Turso |
+| `TURSO_AUTH_TOKEN_U` | Secret | Authorizes user database reads and writes |
+| `JWT_SECRET_U` | Secret | Protects passwords and signs user sessions |
 
-`JWT_SECRET` must contain at least 32 characters. Generate a high-entropy
+`JWT_SECRET_U` must contain at least 32 characters. Generate a high-entropy
 value with a password manager or OpenSSL:
 
 ```bash
@@ -358,7 +358,7 @@ Never commit real credentials to workflow files, Wrangler configuration,
 
 Open:
 
-**Actions > Deploy Sync Worker > Run workflow**
+**Actions > Deploy User Self-Hosted Sync Worker > Run workflow**
 
 The workflow:
 
@@ -367,7 +367,7 @@ The workflow:
 3. typechecks and tests the Worker;
 4. applies the Turso schema;
 5. uploads Turso and JWT credentials as Cloudflare Worker secrets;
-6. deploys using `CLOUDFLARE_NAME`;
+6. deploys using `CLOUDFLARE_NAME_U`;
 7. resolves the exact `workers.dev` endpoint; and
 8. verifies the deployed `/health` response.
 
@@ -414,25 +414,64 @@ registration closes and other devices must sign in.
 
 - Push changes under `cloud/worker/**` or to the deployment workflow to deploy
   automatically.
-- Run **Deploy Sync Worker** manually at any time.
+- Run **Deploy User Self-Hosted Sync Worker** manually at any time.
 - Keep the same Worker name to update the existing endpoint.
 - Keep the same Turso database to preserve accounts and synchronized data.
 - Change a credential in GitHub, then rerun the workflow to upload it.
 - If the Worker name changes, validate the new URL on every device.
 - If the database changes, sign in with an account stored in that database.
 
-Changing `JWT_SECRET` invalidates existing sessions. Devices must sign in
+Changing `JWT_SECRET_U` invalidates existing sessions. Devices must sign in
 again after the rotation.
 
 ## GitHub Actions
 
 | Workflow | Trigger | Output |
 | --- | --- | --- |
-| `deploy-sync-worker.yml` | Manual; changes to Worker or workflow on `main`/`master` | Deployed and health-checked Cloudflare Worker |
+| `deploy-sync-worker.yml` | Manual; changes to Worker or workflow on `main`/`master` | User-owned Worker in first-user registration mode |
+| `deploy-owner-sync-worker.yml` | Manual only | Owner/default-service Worker in invite-key mode with Telegram key delivery |
 | `build-android-apks.yml` | Manual; app changes on `main`/`master` | Android APK/AAB files, Windows installer, and stable GitHub Release |
 
+### Separate user and owner deployments
+
+Fork users should run **Deploy User Self-Hosted Sync Worker**. It reads only
+the six `_U` values documented above and creates a first-user backend.
+It never reads Telegram or registration-administrator credentials.
+
+The project owner should run **Deploy Owner Default Sync Worker** for the
+app's managed default service. This workflow is manual-only, so it does not
+run automatically in forks. It uses a separate Worker and database, enables
+invite-key registration, creates an active registration key, and verifies its
+delivery to Telegram.
+
+Configure these owner-only GitHub secrets:
+
+| Name | Store as | Purpose |
+| --- | --- | --- |
+| `CLOUDFLARE_NAME` | Secret or variable | Managed-service Worker name |
+| `CLOUDFLARE_API_TOKEN` | Secret | Deploys the owner Worker |
+| `CLOUDFLARE_ACCOUNT_ID` | Secret | Selects the owner's Cloudflare account |
+| `TURSO_DATABASE_URL` | Secret | Connects the owner Worker to its Turso database |
+| `TURSO_AUTH_TOKEN` | Secret | Authorizes owner database reads and writes |
+| `JWT_SECRET` | Secret | Protects passwords and signs sessions |
+| `TELEGRAM_BOT_TOKEN` | Secret | Sends registration keys through Telegram |
+| `REGISTRATION_KEY_CHAT_ID` | Secret | Selects the private Telegram destination |
+| `REGISTRATION_ADMIN_SECRET` | Secret | Protects registration-key administration |
+| `KOINLY_SYNC_API_BASE_URL` | Secret or variable | Optional owner Worker URL compiled as the app's default service |
+
+`JWT_SECRET` and `REGISTRATION_ADMIN_SECRET` must contain at least 32
+characters and must be different. The owner workflow uses these existing
+unprefixed values; fork users do not need to configure any of them.
+
 `KOINLY_SYNC_API_BASE_URL` is optional in the app build workflow. Leave it
-unset for local-only or runtime self-hosted builds.
+unset for local-only or runtime self-hosted builds. For managed default sync,
+copy the URL reported by the owner deployment into this value before building
+the app. User self-hosting does not need a matching `_U` build value because
+users paste their Worker URL inside the app.
+
+The owner workflow continues using existing unprefixed entries. Create the
+six `_U` values only for user self-hosting; the two workflows never read each
+other's Cloudflare, Turso, or JWT configuration.
 
 ### Android signing
 
@@ -621,7 +660,7 @@ environment files, signing material, and previously generated archives.
 ### A deployment secret is missing
 
 Add the exact name shown by the workflow under **Settings > Secrets and
-variables > Actions**, then rerun **Deploy Sync Worker**. Only the six values
+variables > Actions**, then rerun **Deploy User Self-Hosted Sync Worker**. Only the six values
 listed in [GitHub Actions configuration](#5-add-github-actions-configuration)
 are required for self-hosting.
 
@@ -629,8 +668,8 @@ are required for self-hosting.
 
 - Recreate the token from the **Edit Cloudflare Workers** template.
 - Scope it to the correct Cloudflare account.
-- Confirm `CLOUDFLARE_ACCOUNT_ID` belongs to that account.
-- Replace `CLOUDFLARE_API_TOKEN` in GitHub and redeploy.
+- Confirm `CLOUDFLARE_ACCOUNT_ID_U` belongs to that account.
+- Replace `CLOUDFLARE_API_TOKEN_U` in GitHub and redeploy.
 
 ### The Worker name is rejected
 
@@ -648,12 +687,12 @@ the name with a dash.
 
 Cloudflare uses error `1042` to block a Worker request loop.
 
-- Confirm `TURSO_DATABASE_URL` is the standard `libsql://*.turso.io` value
+- Confirm `TURSO_DATABASE_URL_U` is the standard `libsql://*.turso.io` value
   copied from `turso db show <database> --url`.
-- Never set `TURSO_DATABASE_URL` to the deployed Worker URL.
+- Never set `TURSO_DATABASE_URL_U` to the deployed Worker URL.
 - Remove any same-account Worker proxy route that sends the Worker back to its
   own `workers.dev` endpoint.
-- Rerun **Deploy Sync Worker**. The workflow uses the exact target URL reported
+- Rerun **Deploy User Self-Hosted Sync Worker**. The workflow uses the exact target URL reported
   by Wrangler and prints the HTTP response when health is not JSON.
 
 ### Account creation says registration is closed
@@ -693,7 +732,8 @@ silently overwriting finance records.
 .
 ├── .github/workflows/
 │   ├── build-android-apks.yml       # Android/Windows builds and releases
-│   └── deploy-sync-worker.yml       # Cloudflare Worker deployment
+│   ├── deploy-owner-sync-worker.yml # Owner/default-service Worker deployment
+│   └── deploy-sync-worker.yml       # User self-hosted Worker deployment
 ├── android/                         # Android platform project
 ├── assets/
 │   ├── icons/

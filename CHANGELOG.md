@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.76] - 2026-08-28
+
+### Changed
+
+- Owner/default-service deployment keeps the existing unprefixed GitHub
+  configuration, while user self-hosted deployment uses separate `_U` names.
+
+## [1.0.75] - 2026-08-27
+
+### Changed
+
+- User self-hosted GitHub configuration now uses the `_U` suffix, while
+  owner/default-service configuration uses the `_A` suffix.
+
+## [1.0.74] - 2026-08-27
+
+### Changed
+
+- Split Worker deployment into a fork-friendly self-hosted workflow and a
+  manual owner/default-service workflow with separate owner-prefixed secrets.
+- Owner deployment now verifies invite-key mode and bootstraps Telegram
+  registration-key delivery without affecting user self-hosted deployments.
+
 ## [1.0.73] - 2026-08-26
 
 ### Fixed
