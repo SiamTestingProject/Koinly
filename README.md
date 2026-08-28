@@ -54,6 +54,7 @@ selected sync service only through HTTPS requests to a Cloudflare Worker.
 - Multiple cash, bank, card, savings, and custom accounts
 - Income, expense, and transfer transactions
 - Required titles for income and expense transactions, shown throughout transaction history
+- Optional start-to-end date ranges for a transaction, with its amount counted once
 - Custom income and expense categories
 - Monthly budgets with progress tracking
 - Lending and borrowing records with contacts, repayments, due dates, and APR-based interest
@@ -68,6 +69,9 @@ selected sync service only through HTTPS requests to a Cloudflare Worker.
 - No account required for local-only use
 - Encrypted `.koinlybackup` backup and restore
 - Automatic safety backups before destructive restore operations
+- Automatic category deduplication during restore and sync, with transaction and budget references preserved
+- Profile media is copied to private app storage and is not uploaded with finance sync data
+- Android Photos and videos access is requested only for choosing profile media
 - Platform secure storage for sync access and refresh tokens
 - Sync credentials excluded from app backups
 - Privacy-safe diagnostic reports in **Advanced settings > Data health**
@@ -77,6 +81,9 @@ selected sync service only through HTTPS requests to a Cloudflare Worker.
 - Adaptive Material 3 interface
 - Light, dark, and system themes
 - Responsive Android and Windows layouts
+- Customizable profiles with photo, animated GIF, or short-video media previews
+- Private profile-media storage with an enforced 500 KB maximum file size
+- Savings Suggestion preferences grouped with profile information in one screen
 - Android daily reminder notifications
 - GitHub Releases-based update checks
 - Architecture-specific Android downloads and Windows installer updates
@@ -167,7 +174,7 @@ unavailable.
 
 ```bash
 flutter build apk --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1043 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1046 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -179,7 +186,7 @@ or test builds; see [Android signing](#android-signing).
 
 ```bash
 flutter build windows --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1043 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1046 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -738,6 +745,7 @@ silently overwriting finance records.
 │   ├── main.dart
 │   ├── models.dart
 │   ├── persistence_stores.dart
+│   ├── profile/                     # Profile media storage, permissions, and UI
 │   ├── sync_models.dart
 │   ├── sync_services.dart
 │   └── update_service.dart

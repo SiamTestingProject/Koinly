@@ -24,9 +24,11 @@ import 'package:sqflite/sqflite.dart' as sql;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart' as sqflite_ffi;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
+import 'package:video_player/video_player.dart';
 
 import 'app_config.dart';
 import 'branding_widgets.dart';
+import 'category_deduplication.dart';
 import 'collection_utils.dart';
 import 'icon_helpers.dart';
 import 'models.dart';
@@ -34,6 +36,7 @@ import 'loans/loan_computation.dart';
 import 'loans/loan_models.dart';
 import 'loans/loan_repository.dart';
 import 'persistence_stores.dart';
+import 'profile/profile_media.dart';
 import 'reminder_service.dart';
 import 'sync_models.dart';
 import 'sync_services.dart';
@@ -43,6 +46,7 @@ import 'update_service.dart';
 part 'loans/loan_controller_part.dart';
 part 'loans/loan_screens.dart';
 part 'loans/loan_sheets.dart';
+part 'profile/profile_ui.dart';
 
 const _uuid = Uuid();
 
@@ -83,6 +87,38 @@ Future<void> main() async {
 // Database and persistence
 // -----------------------------------------------------------------------------
 
+class BudgetCategoryReferenceMerge {
+  const BudgetCategoryReferenceMerge({
+    required this.budgetId,
+    required this.duplicateCategoryId,
+    required this.canonicalCategoryId,
+  });
+
+  final String budgetId;
+  final String duplicateCategoryId;
+  final String canonicalCategoryId;
+}
+
+class CategoryDatabaseMergeResult {
+  const CategoryDatabaseMergeResult({
+    required this.plan,
+    required this.updatedTransactionIds,
+    required this.updatedBudgetReferences,
+  });
+
+  static const empty = CategoryDatabaseMergeResult(
+    plan: CategoryMergePlan.empty,
+    updatedTransactionIds: <String>{},
+    updatedBudgetReferences: <BudgetCategoryReferenceMerge>[],
+  );
+
+  final CategoryMergePlan plan;
+  final Set<String> updatedTransactionIds;
+  final List<BudgetCategoryReferenceMerge> updatedBudgetReferences;
+
+  bool get hasChanges => plan.hasChanges;
+}
+
 class KoinlyDatabase {
   sql.Database? _db;
 
@@ -92,7 +128,7 @@ class KoinlyDatabase {
     final path = p.join(dir, 'koinly_flutter.db');
     _db = await sql.openDatabase(
       path,
-      version: 8,
+      version: 9,
       onCreate: (database, version) async {
         await _createSchema(database);
         await _seed(database);
@@ -150,6 +186,7 @@ class KoinlyDatabase {
         linked_entity_type TEXT,
         linked_entity_id TEXT,
         created_on INTEGER NOT NULL,
+        end_on INTEGER,
         updated_on INTEGER NOT NULL
       )
     ''');
@@ -302,6 +339,9 @@ class KoinlyDatabase {
     if (!columns.contains('linked_entity_id')) {
       await database.execute('ALTER TABLE transactions ADD COLUMN linked_entity_id TEXT');
     }
+    if (!columns.contains('end_on')) {
+      await database.execute('ALTER TABLE transactions ADD COLUMN end_on INTEGER');
+    }
   }
 
   Future<void> _seed(sql.Database database) async {
@@ -422,8 +462,81 @@ class KoinlyDatabase {
     return maps.map(Category.fromMap).toList();
   }
 
-  Future<void> upsertCategory(Category category) async => (await db).insert('categories', category.toMap(), conflictAlgorithm: sql.ConflictAlgorithm.replace);
+  Future<void> upsertCategory(Category category) async {
+    final database = await db;
+    final normalizedName = normalizeCategoryDisplayName(category.name);
+    if (normalizedName.isEmpty) throw StateError('Enter a category name.');
+    final identity = categoryIdentityKey(enumName(category.type), normalizedName);
+    final sameTypeRows = await database.query('categories', where: 'type = ?', whereArgs: [enumName(category.type)]);
+    for (final row in sameTypeRows) {
+      final existingId = row['id']?.toString() ?? '';
+      if (existingId != category.id && categoryIdentityKey(row['type']?.toString() ?? '', row['name']?.toString() ?? '') == identity) {
+        throw StateError('A ${enumName(category.type)} category named "$normalizedName" already exists.');
+      }
+    }
+    await database.insert(
+      'categories',
+      category.copyWith(name: normalizedName).toMap(),
+      conflictAlgorithm: sql.ConflictAlgorithm.replace,
+    );
+  }
   Future<void> deleteCategory(String id) async => (await db).delete('categories', where: 'id = ?', whereArgs: [id]);
+
+  Future<CategoryDatabaseMergeResult> mergeDuplicateCategories() async {
+    final database = await db;
+    final rows = await database.query('categories');
+    final plan = buildCategoryMergePlan(rows);
+    if (!plan.hasChanges) return CategoryDatabaseMergeResult.empty;
+
+    final updatedTransactionIds = <String>{};
+    final updatedBudgetReferences = <BudgetCategoryReferenceMerge>[];
+    final budgetReferenceKeys = <String>{};
+    await database.transaction((txn) async {
+      final now = dateToDb(DateTime.now());
+      for (final entry in plan.normalizedNamesByCanonicalId.entries) {
+        await txn.update(
+          'categories',
+          {'name': entry.value, 'updated_on': now},
+          where: 'id = ?',
+          whereArgs: [entry.key],
+        );
+      }
+      for (final entry in plan.duplicateToCanonicalId.entries) {
+        final duplicateId = entry.key;
+        final canonicalId = entry.value;
+        final transactionRows = await txn.query('transactions', columns: ['id'], where: 'category_id = ?', whereArgs: [duplicateId]);
+        updatedTransactionIds.addAll(transactionRows.map((row) => row['id']?.toString() ?? '').where((id) => id.isNotEmpty));
+        await txn.update('transactions', {'category_id': canonicalId}, where: 'category_id = ?', whereArgs: [duplicateId]);
+
+        final budgetRows = await txn.query('budget_categories', columns: ['budget_id'], where: 'category_id = ?', whereArgs: [duplicateId]);
+        for (final row in budgetRows) {
+          final budgetId = row['budget_id']?.toString() ?? '';
+          if (budgetId.isEmpty) continue;
+          await txn.insert(
+            'budget_categories',
+            {'budget_id': budgetId, 'category_id': canonicalId},
+            conflictAlgorithm: sql.ConflictAlgorithm.ignore,
+          );
+          final key = '$budgetId\u0000$duplicateId\u0000$canonicalId';
+          if (budgetReferenceKeys.add(key)) {
+            updatedBudgetReferences.add(BudgetCategoryReferenceMerge(
+              budgetId: budgetId,
+              duplicateCategoryId: duplicateId,
+              canonicalCategoryId: canonicalId,
+            ));
+          }
+        }
+        await txn.delete('budget_categories', where: 'category_id = ?', whereArgs: [duplicateId]);
+        await txn.delete('categories', where: 'id = ?', whereArgs: [duplicateId]);
+      }
+    });
+
+    return CategoryDatabaseMergeResult(
+      plan: plan,
+      updatedTransactionIds: Set.unmodifiable(updatedTransactionIds),
+      updatedBudgetReferences: List.unmodifiable(updatedBudgetReferences),
+    );
+  }
 
   Future<List<MoneyTransaction>> transactions() async {
     final maps = await (await db).query('transactions', orderBy: 'created_on DESC, updated_on DESC');
@@ -485,10 +598,16 @@ class KoinlyDatabase {
 
   Future<Category> ensureCategory(String name, CategoryType type, String color, String icon) async {
     final database = await db;
-    final rows = await database.query('categories', where: 'name = ? AND type = ?', whereArgs: [name, enumName(type)], limit: 1);
-    if (rows.isNotEmpty) return Category.fromMap(rows.first);
+    final normalizedName = normalizeCategoryDisplayName(name);
+    final identity = categoryIdentityKey(enumName(type), normalizedName);
+    final rows = await database.query('categories', where: 'type = ?', whereArgs: [enumName(type)]);
+    for (final row in rows) {
+      if (categoryIdentityKey(row['type']?.toString() ?? '', row['name']?.toString() ?? '') == identity) {
+        return Category.fromMap(row);
+      }
+    }
     final now = DateTime.now();
-    final category = Category(id: _uuid.v4(), name: name, type: type, iconName: icon, iconColor: color, createdOn: now, updatedOn: now);
+    final category = Category(id: _uuid.v4(), name: normalizedName, type: type, iconName: icon, iconColor: color, createdOn: now, updatedOn: now);
     await database.insert('categories', category.toMap());
     return category;
   }
@@ -541,21 +660,23 @@ class KoinlyDatabase {
     return data;
   }
 
-  Future<void> importAll(Map<String, dynamic> data) async {
+  Future<CategoryMergePlan> importAll(Map<String, dynamic> data) async {
     final database = await db;
+    final normalized = normalizeCategoryDatabasePayload(data);
     final tables = ['loan_payments', 'loans', 'loan_contacts', 'budget_categories', 'budget_accounts', 'budgets', 'transactions', 'categories', 'accounts'];
     await database.transaction((txn) async {
       for (final table in tables) {
         await txn.delete(table);
       }
       for (final table in tables.reversed) {
-        final rows = (data[table] as List? ?? []).cast<Map>();
+        final rows = (normalized.database[table] as List? ?? []).cast<Map>();
         for (final row in rows) {
-          final normalized = Map<String, Object?>.from(row);
-          await txn.insert(table, normalized, conflictAlgorithm: sql.ConflictAlgorithm.replace);
+          final rowMap = Map<String, Object?>.from(row);
+          await txn.insert(table, rowMap, conflictAlgorithm: sql.ConflictAlgorithm.replace);
         }
       }
     });
+    return normalized.plan;
   }
 
   Future<bool> hasLocalUserActivity() async {
@@ -884,11 +1005,12 @@ class BackupService {
 
   static Future<File> createBackup(AppController state) async {
     final dir = await getTemporaryDirectory();
+    final normalized = normalizeCategoryDatabasePayload(await state.database.exportAll());
     final payload = {
-      'version': 6,
+      'version': 7,
       'created_at': DateTime.now().toIso8601String(),
-      'database': await state.database.exportAll(),
-      'preferences': await state.exportPreferences(),
+      'database': normalized.database,
+      'preferences': remapCategoryPreferences(await state.exportPreferences(), normalized.plan),
     };
     final file = File(p.join(dir.path, backupFileName()));
     await file.writeAsString(_crypt(jsonEncode(payload)));
@@ -897,13 +1019,14 @@ class BackupService {
 
   static Future<File> createSafetyBackup(AppController state, {required String reason}) async {
     final backupsDir = await backupStorageDirectory();
+    final normalized = normalizeCategoryDatabasePayload(await state.database.exportAll());
     final payload = {
-      'version': 6,
+      'version': 7,
       'backup_type': 'safety',
       'reason': reason,
       'created_at': DateTime.now().toIso8601String(),
-      'database': await state.database.exportAll(),
-      'preferences': await state.exportPreferences(),
+      'database': normalized.database,
+      'preferences': remapCategoryPreferences(await state.exportPreferences(), normalized.plan),
     };
     final file = File(p.join(backupsDir.path, safetyBackupFileName()));
     await file.writeAsString(_crypt(jsonEncode(payload)));
@@ -937,8 +1060,9 @@ class BackupService {
   static Future<void> restoreBackupFile(AppController state, File file) async {
     final encrypted = await file.readAsString();
     final payload = jsonDecode(_decrypt(encrypted)) as Map<String, dynamic>;
-    await state.database.importAll((payload['database'] as Map).cast<String, dynamic>());
-    await state.importPreferences((payload['preferences'] as Map? ?? {}).cast<String, dynamic>());
+    final plan = await state.database.importAll((payload['database'] as Map).cast<String, dynamic>());
+    final preferences = (payload['preferences'] as Map? ?? {}).cast<String, dynamic>();
+    await state.importPreferences(remapCategoryPreferences(preferences, plan));
     await state.reload();
   }
 
@@ -1102,6 +1226,8 @@ class AppController extends ChangeNotifier {
   final database = KoinlyDatabase();
   final prefs = PrefsStore();
   final secureCredentials = SecureCredentialStore();
+  final profileMediaStorage = const ProfileMediaStorage();
+  final profileMediaPermissions = const ProfileMediaPermissionService();
   static final NumberFormat _groupedAmountFormatter = NumberFormat('#,##0.##');
   static final NumberFormat _plainAmountFormatter = NumberFormat('0.##');
 
@@ -1119,6 +1245,13 @@ class AppController extends ChangeNotifier {
   List<LoanContact> loanContacts = [];
   List<Loan> loans = [];
   List<LoanPayment> loanPayments = [];
+  String profileDisplayName = '';
+  String profileBio = '';
+  String profileMediaPath = '';
+  String profileMediaOriginalName = '';
+  ProfileMediaKind? profileMediaKind;
+  int profileMediaSizeBytes = 0;
+  bool profileMediaPermissionPrompted = false;
   SavingsSuggestionProfile savingsSuggestionProfile = SavingsSuggestionProfile.empty;
   List<String> savedSavingsIdeas = [];
   List<String> plannedSavingsIdeas = [];
@@ -1219,6 +1352,18 @@ class AppController extends ChangeNotifier {
     return desktopSetupVersionCompleted >= kRequiredDesktopSetupVersion;
   }
 
+  bool get hasProfileMedia =>
+      profileMediaPath.trim().isNotEmpty &&
+      profileMediaKind != null &&
+      File(profileMediaPath).existsSync();
+
+  String get profileDisplayLabel {
+    final customName = profileDisplayName.trim();
+    if (customName.isNotEmpty) return customName;
+    final emailName = syncAccountEmail.trim().split('@').first.trim();
+    return emailName.isEmpty ? 'Profile' : emailName;
+  }
+
   void selectTabIndex(int index) {
     if (tabIndex == index) return;
     tabIndex = index;
@@ -1250,6 +1395,27 @@ class AppController extends ChangeNotifier {
     currencyPosition = await prefs.getEnum('currencyPosition', CurrencyPosition.values, CurrencyPosition.suffix);
     useSeparators = await prefs.getBool('useSeparators', true);
     amountsHidden = await prefs.getBool('amountsHidden', false);
+    profileDisplayName = await prefs.getString('profileDisplayName', '');
+    profileBio = await prefs.getString('profileBio', '');
+    profileMediaPath = await prefs.getString('profileMediaPath', '');
+    profileMediaOriginalName = await prefs.getString('profileMediaOriginalName', '');
+    profileMediaSizeBytes = await prefs.getInt('profileMediaSizeBytes', 0);
+    profileMediaPermissionPrompted = await prefs.getBool('profileMediaPermissionPrompted', false);
+    final profileMediaKindName = await prefs.getString('profileMediaKind', '');
+    profileMediaKind = profileMediaKindName.isEmpty
+        ? null
+        : enumByName(ProfileMediaKind.values, profileMediaKindName, ProfileMediaKind.photo);
+    if (profileMediaPath.isNotEmpty && !File(profileMediaPath).existsSync()) {
+      profileMediaPath = '';
+      profileMediaOriginalName = '';
+      profileMediaSizeBytes = 0;
+      profileMediaKind = null;
+      final sharedPreferences = await prefs.prefs;
+      await sharedPreferences.remove('profileMediaPath');
+      await sharedPreferences.remove('profileMediaOriginalName');
+      await sharedPreferences.remove('profileMediaSizeBytes');
+      await sharedPreferences.remove('profileMediaKind');
+    }
     savingsSuggestionProfile = SavingsSuggestionProfile.fromJsonString(await prefs.getString('savingsSuggestionProfile', ''));
     savedSavingsIdeas = await prefs.getStringList('savedSavingsIdeas');
     plannedSavingsIdeas = await prefs.getStringList('plannedSavingsIdeas');
@@ -1613,6 +1779,8 @@ class AppController extends ChangeNotifier {
         'currencyPosition': enumName(currencyPosition),
         'useSeparators': useSeparators,
         'amountsHidden': amountsHidden,
+        'profileDisplayName': profileDisplayName,
+        'profileBio': profileBio,
         'savingsSuggestionProfile': savingsSuggestionProfile.toJson(),
         'savedSavingsIdeas': savedSavingsIdeas,
         'plannedSavingsIdeas': plannedSavingsIdeas,
@@ -1657,6 +1825,11 @@ class AppController extends ChangeNotifier {
       'cloudSyncPin',
       'syncAccountEmail',
       'syncDeviceId',
+      'profileMediaPath',
+      'profileMediaOriginalName',
+      'profileMediaKind',
+      'profileMediaSizeBytes',
+      'profileMediaPermissionPrompted',
     };
     for (final entry in data.entries) {
       if (deviceLocalKeys.contains(entry.key)) continue;
@@ -1673,12 +1846,15 @@ class AppController extends ChangeNotifier {
     await _loadPreferences();
   }
 
-  Future<Map<String, dynamic>> exportCloudPayload() async => {
-        'version': CloudSyncService.payloadVersion,
-        'created_at': DateTime.now().toUtc().toIso8601String(),
-        'database': await database.exportAll(),
-        'preferences': await exportPreferences(),
-      };
+  Future<Map<String, dynamic>> exportCloudPayload() async {
+    final normalized = normalizeCategoryDatabasePayload(await database.exportAll());
+    return {
+      'version': CloudSyncService.payloadVersion,
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+      'database': normalized.database,
+      'preferences': remapCategoryPreferences(await exportPreferences(), normalized.plan),
+    };
+  }
 
   String get cloudSyncStatusText {
     if (cloudSyncBusy) return syncStatus.trim().isEmpty ? 'Online sync • Syncing...' : syncStatus;
@@ -2138,8 +2314,8 @@ class AppController extends ChangeNotifier {
       final databasePayload = (payload['database'] as Map? ?? {}).cast<String, dynamic>();
       final preferencesPayload = (payload['preferences'] as Map? ?? {}).cast<String, dynamic>();
       await requireSafetyBackup('Before legacy online cloud restore');
-      await database.importAll(databasePayload);
-      await importPreferences(preferencesPayload);
+      final plan = await database.importAll(databasePayload);
+      await importPreferences(remapCategoryPreferences(preferencesPayload, plan));
       cloudSyncEnabled = true;
       await prefs.setBool('cloudSyncEnabled', true);
       await prefs.setString('cloudSyncApiBaseUrl', cloudSyncApiBaseUrl);
@@ -2235,6 +2411,7 @@ class AppController extends ChangeNotifier {
       if (shouldUploadAuthoritativeData) {
         await uploadAuthoritativeCloudData(silent: true);
       } else if (register) {
+        await _repairDuplicateCategories(queueSyncChanges: false);
         await database.enqueueAllForAdoption(await exportPreferences());
         await performMultiDeviceSync(silent: true);
       } else {
@@ -2485,6 +2662,7 @@ class AppController extends ChangeNotifier {
     }
     try {
       final api = KoinlySyncApi(baseUrl: cloudSyncApiBaseUrl);
+      await _repairDuplicateCategories(queueSyncChanges: false);
       final operations = await database.fullReplacementOperations(await exportPreferences());
       final response = await api.replaceAll(accessToken: syncAccessToken, operations: operations);
       await database.resetLocalSyncTracking();
@@ -2643,6 +2821,63 @@ class AppController extends ChangeNotifier {
     super.dispose();
   }
 
+  Future<CategoryDatabaseMergeResult> _repairDuplicateCategories({bool queueSyncChanges = true}) async {
+    final result = await database.mergeDuplicateCategories();
+    if (!result.hasChanges) return result;
+
+    var preferencesChanged = false;
+    String? remapDefaultCategory(String? id) {
+      if (id == null || id.isEmpty) return id;
+      final remapped = result.plan.remapCategoryId(id);
+      if (remapped != id) preferencesChanged = true;
+      return remapped;
+    }
+
+    defaultExpenseCategoryId = remapDefaultCategory(defaultExpenseCategoryId);
+    defaultIncomeCategoryId = remapDefaultCategory(defaultIncomeCategoryId);
+    final remappedFilters = <String>[];
+    final seenFilters = <String>{};
+    for (final id in filterCategoryIds) {
+      final remapped = result.plan.remapCategoryId(id);
+      if (remapped != id) preferencesChanged = true;
+      if (remapped.isNotEmpty && seenFilters.add(remapped)) remappedFilters.add(remapped);
+    }
+    if (remappedFilters.length != filterCategoryIds.length) preferencesChanged = true;
+    filterCategoryIds = remappedFilters;
+
+    if (preferencesChanged) {
+      await prefs.setString('defaultExpenseCategoryId', defaultExpenseCategoryId ?? '');
+      await prefs.setString('defaultIncomeCategoryId', defaultIncomeCategoryId ?? '');
+      await prefs.setStringList('filterCategoryIds', filterCategoryIds);
+    }
+
+    if (queueSyncChanges) {
+      final canonicalIds = result.plan.canonicalCategoryIds.toList()..sort();
+      for (final categoryId in canonicalIds) {
+        await database.enqueueTableRow('categories', categoryId);
+      }
+      final transactionIds = result.updatedTransactionIds.toList()..sort();
+      for (final transactionId in transactionIds) {
+        await database.enqueueTableRow('transactions', transactionId);
+      }
+      final budgetReferences = result.updatedBudgetReferences.toList()
+        ..sort((first, second) {
+          final byBudget = first.budgetId.compareTo(second.budgetId);
+          return byBudget != 0 ? byBudget : first.duplicateCategoryId.compareTo(second.duplicateCategoryId);
+        });
+      for (final reference in budgetReferences) {
+        await database.enqueueTableRow('budget_categories', '${reference.budgetId}:${reference.canonicalCategoryId}');
+        await database.enqueueDelete('budget_categories', '${reference.budgetId}:${reference.duplicateCategoryId}');
+      }
+      final duplicateIds = result.plan.duplicateToCanonicalId.keys.toList()..sort();
+      for (final duplicateId in duplicateIds) {
+        await database.enqueueDelete('categories', duplicateId);
+      }
+      if (preferencesChanged) await database.enqueuePreferences(await exportPreferences());
+    }
+    return result;
+  }
+
   Future<bool> _removeSkippedStarterAccountsIfNeeded({bool force = false, bool allowMixedAccounts = false}) async {
     var shouldRemoveStarterAccounts = force || starterAccountsSkipped;
     if (!shouldRemoveStarterAccounts && onboardingCompleted && await database.hasOnlyUntouchedStarterAccounts()) {
@@ -2670,6 +2905,8 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> reload({bool queueSync = false}) async {
+    final categoryMerge = await _repairDuplicateCategories();
+    if (categoryMerge.hasChanges) queueSync = true;
     if (await _removeSkippedStarterAccountsIfNeeded()) {
       queueSync = true;
     }
@@ -2776,6 +3013,66 @@ class AppController extends ChangeNotifier {
     amountsHidden = !amountsHidden;
     await prefs.setBool('amountsHidden', amountsHidden);
     notifyListeners();
+  }
+
+  Future<void> saveUserProfile({
+    required String displayName,
+    required String bio,
+  }) async {
+    profileDisplayName = displayName.trim();
+    profileBio = bio.trim();
+    await prefs.setString('profileDisplayName', profileDisplayName);
+    await prefs.setString('profileBio', profileBio);
+    notifyListeners();
+    await queuePreferenceSync();
+  }
+
+  Future<void> replaceProfileMedia({
+    required String originalName,
+    Uint8List? bytes,
+    String? sourcePath,
+  }) async {
+    final stored = await profileMediaStorage.save(
+      originalName: originalName,
+      bytes: bytes,
+      sourcePath: sourcePath,
+    );
+    profileMediaPath = stored.path;
+    profileMediaOriginalName = stored.originalName;
+    profileMediaKind = stored.kind;
+    profileMediaSizeBytes = stored.sizeBytes;
+    await prefs.setString('profileMediaPath', profileMediaPath);
+    await prefs.setString('profileMediaOriginalName', profileMediaOriginalName);
+    await prefs.setString('profileMediaKind', profileMediaKind!.name);
+    await prefs.setInt('profileMediaSizeBytes', profileMediaSizeBytes);
+    notifyListeners();
+  }
+
+  Future<void> removeProfileMedia() async {
+    final previousPath = profileMediaPath;
+    profileMediaPath = '';
+    profileMediaOriginalName = '';
+    profileMediaKind = null;
+    profileMediaSizeBytes = 0;
+    final sharedPreferences = await prefs.prefs;
+    await sharedPreferences.remove('profileMediaPath');
+    await sharedPreferences.remove('profileMediaOriginalName');
+    await sharedPreferences.remove('profileMediaKind');
+    await sharedPreferences.remove('profileMediaSizeBytes');
+    notifyListeners();
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+      await profileMediaStorage.remove(previousPath);
+    } catch (_) {
+      // The profile is already cleared. A locked stale file is removed during
+      // the next media replacement.
+    }
+  }
+
+  Future<void> markProfileMediaPermissionPrompted() async {
+    if (profileMediaPermissionPrompted) return;
+    profileMediaPermissionPrompted = true;
+    await prefs.setBool('profileMediaPermissionPrompted', true);
   }
 
   List<SavingsPurchaseSuggestion> savingsPurchaseSuggestions() => buildSavingsPurchaseSuggestions(this);
@@ -3459,8 +3756,11 @@ class StartupGate extends StatelessWidget {
       (state) => (loading: state.loading, setupCompleted: state.setupCompletedForCurrentPlatform),
     );
     if (gate.loading) return const SplashScreen();
-    if (!gate.setupCompleted) return const OnboardingScreen();
-    return const FinancialHealthReviewGate(child: MainShell());
+    return ProfileMediaPermissionGate(
+      child: gate.setupCompleted
+          ? const FinancialHealthReviewGate(child: MainShell())
+          : const OnboardingScreen(),
+    );
   }
 }
 
@@ -4833,6 +5133,20 @@ Future<DateTime?> pickDate(BuildContext context, DateTime initial) => showDatePi
       lastDate: DateTime(2100),
     );
 
+Future<DateTimeRange?> pickDateRange(BuildContext context, DateTime start, DateTime end) {
+  final startDate = DateTime(start.year, start.month, start.day);
+  final requestedEnd = DateTime(end.year, end.month, end.day);
+  final endDate = requestedEnd.isBefore(startDate) ? startDate : requestedEnd;
+  return showDateRangePicker(
+    context: context,
+    firstDate: DateTime(2000),
+    lastDate: DateTime(2100),
+    initialDateRange: DateTimeRange(start: startDate, end: endDate),
+    helpText: 'Select transaction date range',
+    saveText: 'Use range',
+  );
+}
+
 Future<TimeOfDay?> pickTime(BuildContext context, TimeOfDay initial) => showTimePicker(context: context, initialTime: initial);
 
 OverlayEntry? _activeKoinlySnackEntry;
@@ -6097,21 +6411,6 @@ class SavingsAccountsContent extends StatefulWidget {
 }
 
 class _SavingsAccountsContentState extends State<SavingsAccountsContent> {
-  bool _profilePromptScheduled = false;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final state = context.read<AppController>();
-    if (!_profilePromptScheduled && !state.savingsSuggestionProfile.completed) {
-      _profilePromptScheduled = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (!mounted) return;
-        await showSavingsSuggestionProfileSheet(context, firstRun: true);
-      });
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Stack(
@@ -6419,112 +6718,6 @@ class _SuggestionDetailRow extends StatelessWidget {
                   Text(body, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant, fontWeight: FontWeight.w700)),
                 ],
               ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-Future<void> showSavingsSuggestionProfileSheet(BuildContext context, {bool firstRun = false}) async {
-  await showKoinlyPopup<void>(
-    context,
-    maxWidth: 560,
-    maxHeight: 720,
-    barrierDismissible: !firstRun,
-    child: SavingsSuggestionProfileEditor(firstRun: firstRun),
-  );
-}
-
-class SavingsSuggestionProfileEditor extends StatefulWidget {
-  const SavingsSuggestionProfileEditor({super.key, this.firstRun = false});
-
-  final bool firstRun;
-
-  @override
-  State<SavingsSuggestionProfileEditor> createState() => _SavingsSuggestionProfileEditorState();
-}
-
-class _SavingsSuggestionProfileEditorState extends State<SavingsSuggestionProfileEditor> {
-  final hobby = TextEditingController();
-  final occupation = TextEditingController();
-  final age = TextEditingController();
-  final goal = TextEditingController();
-  final preference = TextEditingController();
-  final extra = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    final profile = context.read<AppController>().savingsSuggestionProfile;
-    hobby.text = profile.hobby;
-    occupation.text = profile.occupation;
-    age.text = profile.age <= 0 ? '' : '${profile.age}';
-    goal.text = profile.savingsGoal;
-    preference.text = profile.spendingPreference;
-    extra.text = profile.extraDetails;
-  }
-
-  @override
-  void dispose() {
-    hobby.dispose();
-    occupation.dispose();
-    age.dispose();
-    goal.dispose();
-    preference.dispose();
-    extra.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save({bool skip = false}) async {
-    final profile = skip
-        ? SavingsSuggestionProfile.empty.copyWith(completed: true, updatedOn: DateTime.now())
-        : SavingsSuggestionProfile(
-            completed: true,
-            hobby: hobby.text.trim(),
-            occupation: occupation.text.trim(),
-            age: int.tryParse(age.text.trim()) ?? 0,
-            savingsGoal: goal.text.trim(),
-            spendingPreference: preference.text.trim(),
-            extraDetails: extra.text.trim(),
-            updatedOn: DateTime.now(),
-          );
-    await context.read<AppController>().saveSavingsSuggestionProfile(profile);
-    if (mounted) Navigator.pop(context);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 20, 18, 16),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(widget.firstRun ? 'Savings suggestion profile' : 'Edit suggestion profile', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
-            const SizedBox(height: 8),
-            Text('Used only to personalize optional purchase ideas. Savings transfers remain internal and do not count as income or expense.', textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: kSleekMuted, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 16),
-            TextField(controller: hobby, decoration: const InputDecoration(labelText: 'Hobby', hintText: 'Gaming, anime, reading, travel...')),
-            const SizedBox(height: 10),
-            TextField(controller: occupation, decoration: const InputDecoration(labelText: 'Occupation', hintText: 'Student, worker, creator...')),
-            const SizedBox(height: 10),
-            TextField(controller: age, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Age')),
-            const SizedBox(height: 10),
-            TextField(controller: goal, decoration: const InputDecoration(labelText: 'Savings goal', hintText: 'Emergency fund, phone, PC, trip...')),
-            const SizedBox(height: 10),
-            TextField(controller: preference, decoration: const InputDecoration(labelText: 'Spending preference', hintText: 'Careful, balanced, hobby-first...')),
-            const SizedBox(height: 10),
-            TextField(controller: extra, minLines: 2, maxLines: 3, decoration: const InputDecoration(labelText: 'Other details optional')),
-            const SizedBox(height: 18),
-            Row(
-              children: [
-                Expanded(child: OutlinedButton(onPressed: () => _save(skip: true), child: Text(widget.firstRun ? 'Skip' : 'Reset'))),
-                const SizedBox(width: 10),
-                Expanded(flex: 2, child: FilledButton(onPressed: _save, child: const Text('Save profile'))),
-              ],
             ),
           ],
         ),
@@ -7785,8 +7978,12 @@ class _CategoryEditorState extends State<CategoryEditor> {
                 if (name.text.trim().isEmpty) return;
                 final now = DateTime.now();
                 final category = Category(id: widget.category?.id ?? _uuid.v4(), name: name.text.trim(), type: type, iconName: icon, iconColor: color, createdOn: widget.category?.createdOn ?? now, updatedOn: now);
-                await state.saveCategory(category);
-                if (context.mounted) Navigator.pop(context);
+                try {
+                  await state.saveCategory(category);
+                  if (context.mounted) Navigator.pop(context);
+                } on StateError catch (error) {
+                  if (context.mounted) showSnack(context, error.message);
+                }
               }, child: const Text('Save'))),
             ]),
           ],
@@ -7866,7 +8063,7 @@ class TransactionTile extends StatelessWidget {
             : category?.name ?? 'Unknown';
     final subtitleParts = <String>[
       if (tx.type != MoneyTransactionType.transfer && savedTitle.isNotEmpty && category != null) category.name,
-      DateFormat('MMM d, yyyy • h:mm a').format(tx.createdOn),
+      transactionDateTimeLabel(tx),
       if (tx.notes.trim().isNotEmpty) tx.notes.trim(),
     ];
     return ExpressiveCard(
@@ -7894,6 +8091,19 @@ class TransactionTile extends StatelessWidget {
   }
 }
 
+String transactionDateSpanLabel(DateTime start, DateTime end) {
+  if (isSameCalendarDay(start, end)) return DateFormat('MMM d, yyyy').format(start);
+  if (start.year == end.year && start.month == end.month) {
+    return '${DateFormat('MMM d').format(start)} → ${DateFormat('d, yyyy').format(end)}';
+  }
+  if (start.year == end.year) {
+    return '${DateFormat('MMM d').format(start)} → ${DateFormat('MMM d, yyyy').format(end)}';
+  }
+  return '${DateFormat('MMM d, yyyy').format(start)} → ${DateFormat('MMM d, yyyy').format(end)}';
+}
+
+String transactionDateTimeLabel(MoneyTransaction transaction) =>
+    '${transactionDateSpanLabel(transaction.createdOn, transaction.effectiveEndOn)} • ${DateFormat('h:mm a').format(transaction.createdOn)}';
 
 Future<void> showTransactionEditor(BuildContext context, {MoneyTransaction? transaction, Category? lockedCategory}) async {
   await showKoinlyPopup<void>(
@@ -7922,6 +8132,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
   String? fromAccountId;
   String? toAccountId;
   DateTime selectedDate = DateTime.now();
+  DateTime selectedEndDate = DateTime.now();
 
   @override
   void initState() {
@@ -7937,6 +8148,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
       fromAccountId = tx.fromAccountId;
       toAccountId = tx.toAccountId;
       selectedDate = tx.createdOn;
+      selectedEndDate = tx.effectiveEndOn;
     } else {
       type = widget.lockedCategory?.type == CategoryType.income ? MoneyTransactionType.income : MoneyTransactionType.expense;
       categoryId = widget.lockedCategory?.id ?? (type == MoneyTransactionType.income ? state.defaultIncomeCategoryId : state.defaultExpenseCategoryId);
@@ -8091,11 +8303,31 @@ class _TransactionEditorState extends State<TransactionEditor> {
               ),
             ],
             const SizedBox(height: 12),
-            Row(children: [
-              Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await pickDate(context, selectedDate); if (d != null) setState(() => selectedDate = DateTime(d.year, d.month, d.day, selectedDate.hour, selectedDate.minute)); }, icon: const Icon(Icons.date_range_rounded), label: Text(DateFormat('MMM d, yyyy').format(selectedDate)))),
-              const SizedBox(width: 8),
-              Expanded(child: OutlinedButton.icon(onPressed: () async { final t = await pickTime(context, TimeOfDay.fromDateTime(selectedDate)); if (t != null) setState(() => selectedDate = DateTime(selectedDate.year, selectedDate.month, selectedDate.day, t.hour, t.minute)); }, icon: const Icon(Icons.schedule_rounded), label: Text(DateFormat('h:mm a').format(selectedDate)))),
-            ]),
+            OutlinedButton.icon(
+              onPressed: () async {
+                final range = await pickDateRange(context, selectedDate, selectedEndDate);
+                if (range == null) return;
+                setState(() {
+                  selectedDate = DateTime(range.start.year, range.start.month, range.start.day, selectedDate.hour, selectedDate.minute);
+                  selectedEndDate = DateTime(range.end.year, range.end.month, range.end.day, selectedDate.hour, selectedDate.minute);
+                });
+              },
+              icon: const Icon(Icons.date_range_rounded),
+              label: Text(transactionDateSpanLabel(selectedDate, selectedEndDate)),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () async {
+                final time = await pickTime(context, TimeOfDay.fromDateTime(selectedDate));
+                if (time == null) return;
+                setState(() {
+                  selectedDate = DateTime(selectedDate.year, selectedDate.month, selectedDate.day, time.hour, time.minute);
+                  selectedEndDate = DateTime(selectedEndDate.year, selectedEndDate.month, selectedEndDate.day, time.hour, time.minute);
+                });
+              },
+              icon: const Icon(Icons.schedule_rounded),
+              label: Text(DateFormat('h:mm a').format(selectedDate)),
+            ),
             const SizedBox(height: 12),
             TextField(controller: notes, minLines: 1, maxLines: 3, decoration: const InputDecoration(labelText: 'Notes')),
             const SizedBox(height: 18),
@@ -8124,6 +8356,7 @@ class _TransactionEditorState extends State<TransactionEditor> {
                   linkedEntityType: widget.transaction?.linkedEntityType,
                   linkedEntityId: widget.transaction?.linkedEntityId,
                   createdOn: selectedDate,
+                  endOn: isSameCalendarDay(selectedDate, selectedEndDate) ? null : selectedEndDate,
                   updatedOn: DateTime.now(),
                 );
                 if (widget.transaction == null) {
@@ -9727,6 +9960,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     return PageScaffold(
       title: 'Categories',
       subtitle: selected == CategoryType.expense ? 'Expense breakdown' : 'Income breakdown',
+      actions: const [ProfileAvatarButton()],
       child: ResponsiveContent(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -9946,48 +10180,9 @@ class CategoryBreakdownCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          chartTitle,
-                          style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(999),
-                      onTap: () => showDateRangeSheet(context),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: isDark ? scheme.surfaceContainerHigh.withOpacity(.88) : const Color(0xFFEAF3F5).withOpacity(.94),
-                          borderRadius: BorderRadius.circular(999),
-                          border: Border.all(color: isDark ? scheme.outline.withOpacity(.16) : const Color(0xFFD8E7EA)),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              rangeLabel,
-                              style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800),
-                            ),
-                            const SizedBox(width: 4),
-                            Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: scheme.onSurfaceVariant),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+              Text(
+                chartTitle,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
               ),
               const SizedBox(height: 16),
               SizedBox(
@@ -10710,7 +10905,6 @@ class SettingsScreen extends StatelessWidget {
             SettingsTile(icon: Icons.palette_rounded, title: 'Theme', subtitle: _themeLabel(state.themePreference), color: '#A6E3A1', onTap: () => showThemeDialog(context)),
             SettingsTile(icon: Icons.payments_rounded, title: 'Currency customization', subtitle: '${state.currencyCode} • ${state.currencyPosition == CurrencyPosition.prefix ? 'Prefix' : 'Suffix'}', color: '#78D8E8', onTap: () => showCurrencySheet(context)),
             SettingsTile(icon: Icons.notifications_active_rounded, title: 'Reminder notification', subtitle: state.reminderEnabled ? 'Daily at ${state.reminderTime.format(context)}' : 'Disabled', color: '#FBC879', onTap: () => showReminderSheet(context)),
-            SettingsTile(icon: Icons.lightbulb_rounded, title: 'Savings suggestion profile', subtitle: state.savingsSuggestionProfile.shortLabel, color: '#FFB5D0', onTap: () => showSavingsSuggestionProfileSheet(context)),
             SettingsTile(icon: Icons.cloud_sync_rounded, title: 'Account & sync', subtitle: state.cloudSyncEnabled ? '${state.syncStatus} • ${state.syncAccountEmail}' : 'Sign in for multi-device sync', color: '#78D8E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MultiDeviceSyncScreen()))),
             SettingsTile(icon: Icons.system_update_alt_rounded, title: 'Updates', subtitle: state.updateStatusMessage, color: '#00D7E8', onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const UpdatesScreen()))),
             SettingsTile(icon: Icons.filter_alt_rounded, title: 'Default date filter', subtitle: _dateRangeLabel(state.dateRangeType), color: '#B4A5FF', onTap: () => showDateRangeSheet(context)),

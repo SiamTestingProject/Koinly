@@ -8,7 +8,7 @@ import 'package:mongo_dart/mongo_dart.dart' as mongo;
 import 'sync_models.dart';
 
 class CloudSyncService {
-  static const int payloadVersion = 6;
+  static const int payloadVersion = 7;
   static const String defaultApiBaseUrl = String.fromEnvironment(
     'KOINLY_SYNC_API_BASE_URL',
     defaultValue: '',

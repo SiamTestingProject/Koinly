@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.0.1046] - 2026-08-28
+
+### Added
+
+- Added a Profile entry to the Categories header with editable display name and
+  bio fields.
+- Added profile photo, animated GIF, and short-video selection, preview,
+  replacement, removal, and muted looping playback on Android and Windows.
+- Enforced a 500 KB profile-media limit before private app storage and added
+  clear validation feedback for oversized or unsupported files.
+- Added a first-launch Android Photos and videos permission flow with retry and
+  app-settings recovery for denied and permanently denied states.
+
+### Changed
+
+- Moved Savings Suggestion preferences from Settings into the Profile screen so
+  they have one configuration location.
+- Removed the date-range pill from the Categories breakdown header while
+  retaining the active app-wide date range for calculations and chart context.
+
+## [1.0.1045] - 2026-08-28
+
+### Fixed
+
+- Prevented categories with different IDs but the same normalized name and type
+  from multiplying after backup restore, upload, or multi-device sync.
+- Existing duplicates are merged deterministically while transaction, budget,
+  filter, and default-category references are moved to the retained category.
+- New categories and loan-generated categories now reject or reuse equivalent
+  names instead of creating another record.
+
+## [1.0.1044] - 2026-08-28
+
+### Added
+
+- Added an optional start-to-end date range to income, expense, and transfer
+  transactions while applying each transaction amount only once.
+- Transaction history now displays the saved date span, and older single-date
+  transactions remain compatible.
+
+### Changed
+
+- Advanced the local database, backup, and full-sync payload versions for the
+  optional transaction end date.
+
 ## [1.0.1043] - 2026-08-28
 
 ### Changed

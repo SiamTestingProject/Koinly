@@ -100,7 +100,17 @@ DateTime dateFromDb(Object? value) {
   return DateTime.now();
 }
 
+DateTime? nullableDateFromDb(Object? value) {
+  if (value == null) return null;
+  if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+  if (value is String) return DateTime.tryParse(value);
+  return null;
+}
+
 int dateToDb(DateTime value) => value.millisecondsSinceEpoch;
+
+bool isSameCalendarDay(DateTime first, DateTime second) =>
+    first.year == second.year && first.month == second.month && first.day == second.day;
 
 Color colorFromHex(String value, {Color fallback = const Color(0xFF78D8E8)}) {
   final cleaned = value.replaceAll('#', '').trim();
@@ -262,6 +272,7 @@ class MoneyTransaction {
     this.linkedEntityType,
     this.linkedEntityId,
     required this.createdOn,
+    this.endOn,
     required this.updatedOn,
   });
 
@@ -278,11 +289,18 @@ class MoneyTransaction {
   final String? linkedEntityType;
   final String? linkedEntityId;
   final DateTime createdOn;
+  final DateTime? endOn;
   final DateTime updatedOn;
 
   bool get countsAsIncome => !excludeFromReports && type == MoneyTransactionType.income;
   bool get countsAsExpense => !excludeFromReports && type == MoneyTransactionType.expense;
   String get displayType => enumName(type);
+  DateTime get effectiveEndOn {
+    final value = endOn;
+    return value == null || value.isBefore(createdOn) ? createdOn : value;
+  }
+
+  bool get spansMultipleDays => !isSameCalendarDay(createdOn, effectiveEndOn);
 
   MoneyTransaction copyWith({
     String? id,
@@ -298,6 +316,7 @@ class MoneyTransaction {
     String? linkedEntityType,
     String? linkedEntityId,
     DateTime? createdOn,
+    DateTime? endOn,
     DateTime? updatedOn,
   }) => MoneyTransaction(
         id: id ?? this.id,
@@ -313,6 +332,7 @@ class MoneyTransaction {
         linkedEntityType: linkedEntityType ?? this.linkedEntityType,
         linkedEntityId: linkedEntityId ?? this.linkedEntityId,
         createdOn: createdOn ?? this.createdOn,
+        endOn: endOn ?? this.endOn,
         updatedOn: updatedOn ?? this.updatedOn,
       );
 
@@ -330,6 +350,7 @@ class MoneyTransaction {
         'linked_entity_type': linkedEntityType,
         'linked_entity_id': linkedEntityId,
         'created_on': dateToDb(createdOn),
+        'end_on': endOn == null ? null : dateToDb(endOn!),
         'updated_on': dateToDb(updatedOn),
       };
 
@@ -347,6 +368,7 @@ class MoneyTransaction {
         linkedEntityType: map['linked_entity_type'] as String?,
         linkedEntityId: map['linked_entity_id'] as String?,
         createdOn: dateFromDb(map['created_on']),
+        endOn: nullableDateFromDb(map['end_on']),
         updatedOn: dateFromDb(map['updated_on']),
       );
 }

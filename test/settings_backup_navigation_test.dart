@@ -19,7 +19,17 @@ void main() {
     await pumpSettingsScreen(tester, const SettingsScreen());
 
     expect(find.text('Load backup'), findsNothing);
+    expect(find.text('Savings suggestion profile'), findsNothing);
     expect(find.text('Advanced settings'), findsOneWidget);
+  });
+
+  testWidgets('Profile is the only Savings Suggestion configuration screen', (tester) async {
+    await pumpSettingsScreen(tester, const ProfileScreen());
+
+    expect(find.text('Profile information'), findsOneWidget);
+    expect(find.text('Profile media'), findsOneWidget);
+    expect(find.text('Savings Suggestion'), findsOneWidget);
+    expect(find.text('Save preferences'), findsOneWidget);
   });
 
   testWidgets('Advanced settings keeps backup loading available', (tester) async {
