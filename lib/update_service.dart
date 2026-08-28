@@ -204,7 +204,8 @@ class GithubUpdateService {
     bool includePrereleases = includePrereleaseUpdates,
   }) async {
     final installed = SemanticVersion.tryParse(installedVersion);
-    final uri = Uri.parse('$updateGithubApiBase/repos/$updateRepositorySlug/releases');
+    final releasePath = includePrereleases ? 'releases' : 'releases/latest';
+    final uri = Uri.parse('$updateGithubApiBase/repos/$updateRepositorySlug/$releasePath');
     http.Response response;
     try {
       response = await _client
@@ -234,16 +235,24 @@ class GithubUpdateService {
     } catch (_) {
       return UpdateCheckResult(outcome: UpdateCheckOutcome.malformedData, installedVersion: installed, message: 'GitHub returned malformed release data.');
     }
-    if (decoded is! List) {
-      return UpdateCheckResult(outcome: UpdateCheckOutcome.malformedData, installedVersion: installed, message: 'GitHub release data was not a list.');
+    final Iterable<Map> rawReleases;
+    if (includePrereleases) {
+      if (decoded is! List) {
+        return UpdateCheckResult(outcome: UpdateCheckOutcome.malformedData, installedVersion: installed, message: 'GitHub release data was not a list.');
+      }
+      rawReleases = decoded.whereType<Map>();
+    } else {
+      if (decoded is! Map) {
+        return UpdateCheckResult(outcome: UpdateCheckOutcome.malformedData, installedVersion: installed, message: 'GitHub latest-release data was not an object.');
+      }
+      rawReleases = [decoded];
     }
 
-    final releases = decoded.whereType<Map>().map((release) => GithubRelease.fromJson(Map<String, dynamic>.from(release))).where((release) {
+    final releases = rawReleases.map((release) => GithubRelease.fromJson(Map<String, dynamic>.from(release))).where((release) {
       if (release.draft) return false;
       if (!includePrereleases && release.prerelease) return false;
       return release.semanticVersion != null;
-    }).toList()
-      ..sort((a, b) => b.semanticVersion!.compareTo(a.semanticVersion!));
+    }).toList();
 
     if (releases.isEmpty) {
       return UpdateCheckResult(outcome: UpdateCheckOutcome.noReleaseAvailable, installedVersion: installed, message: 'No stable release is available yet.');

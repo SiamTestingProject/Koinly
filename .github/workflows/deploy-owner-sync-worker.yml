@@ -2,9 +2,17 @@ name: Deploy Owner Default Sync Worker
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "cloud/worker/**"
+      - ".github/workflows/deploy-owner-sync-worker.yml"
 
 jobs:
   deploy:
+    if: github.repository == 'SiamTestingProject/Koinly'
     runs-on: ubuntu-latest
     defaults:
       run:

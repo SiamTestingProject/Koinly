@@ -12,6 +12,7 @@ on:
 
 jobs:
   deploy:
+    if: github.event_name == 'workflow_dispatch' || github.repository != 'SiamTestingProject/Koinly'
     runs-on: ubuntu-latest
     defaults:
       run:

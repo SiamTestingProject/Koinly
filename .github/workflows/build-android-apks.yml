@@ -23,6 +23,7 @@ concurrency:
 jobs:
   build-apks:
     name: Build ARM32, ARM64, and universal APKs
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'SiamTestingProject/Koinly'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -226,6 +227,7 @@ jobs:
 
   build-windows:
     name: Build Windows x64 installer EXE
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'SiamTestingProject/Koinly'
     runs-on: windows-2022
     permissions:
       contents: read
@@ -554,7 +556,11 @@ jobs:
     needs:
       - build-apks
       - build-windows
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: >-
+      github.repository == 'SiamTestingProject/Koinly' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.ref == 'refs/heads/main' ||
+       github.ref == 'refs/heads/master')
     permissions:
       contents: write
 

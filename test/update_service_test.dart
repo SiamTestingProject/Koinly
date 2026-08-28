@@ -24,25 +24,37 @@ void main() {
   });
 
   group('GithubUpdateService', () {
-    test('ignores drafts and prereleases unless enabled', () async {
-      final service = GithubUpdateService(client: _client([
-        _release('v9.0.0', draft: true),
-        _release('v8.0.0', prerelease: true),
-        _release('v1.5.0'),
-      ]));
+    test('stable checks use GitHub latest release endpoint', () async {
+      final service = GithubUpdateService(client: _latestClient(_release('v1.5.0')));
       final result = await service.check(installedVersion: '1.0.0', includePrereleases: false);
       expect(result.outcome, UpdateCheckOutcome.updateAvailable);
       expect(result.release!.displayVersion, '1.5.0');
     });
 
-    test('can include prereleases for development builds', () async {
+    test('prerelease checks follow GitHub release order instead of sorting old tags numerically', () async {
       final service = GithubUpdateService(client: _client([
-        _release('v2.0.0-beta.1', prerelease: true),
-        _release('v1.5.0'),
+        _release('v1.0.79-beta.1', prerelease: true),
+        _release('v1.0.1035'),
       ]));
-      final result = await service.check(installedVersion: '1.0.0', includePrereleases: true);
+      final result = await service.check(installedVersion: '1.0.78', includePrereleases: true);
       expect(result.outcome, UpdateCheckOutcome.updateAvailable);
-      expect(result.release!.tagName, 'v2.0.0-beta.1');
+      expect(result.release!.tagName, 'v1.0.79-beta.1');
+    });
+
+    test('GitHub latest 1.0.77 wins over the older 1.0.1035 release', () async {
+      final service = GithubUpdateService(client: MockClient((request) async {
+        if (request.url.path.endsWith('/releases/latest')) {
+          return http.Response(jsonEncode(_release('v1.0.77')), 200, headers: {'content-type': 'application/json'});
+        }
+        return http.Response(
+          jsonEncode([_release('v1.0.77'), _release('v1.0.1035')]),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }));
+      final result = await service.check(installedVersion: '1.0.76');
+      expect(result.outcome, UpdateCheckOutcome.updateAvailable);
+      expect(result.release!.displayVersion, '1.0.77');
     });
 
     test('treats missing releases as no release available', () async {
@@ -52,13 +64,13 @@ void main() {
     });
 
     test('detects newer stable release', () async {
-      final service = GithubUpdateService(client: _client([_release('v1.5.0')]));
+      final service = GithubUpdateService(client: _latestClient(_release('v1.5.0')));
       final result = await service.check(installedVersion: '1.4.10');
       expect(result.outcome, UpdateCheckOutcome.updateAvailable);
     });
 
     test('reports up to date when installed version is current', () async {
-      final service = GithubUpdateService(client: _client([_release('v1.5.0')]));
+      final service = GithubUpdateService(client: _latestClient(_release('v1.5.0')));
       final result = await service.check(installedVersion: '1.5.0');
       expect(result.outcome, UpdateCheckOutcome.upToDate);
     });
@@ -139,7 +151,17 @@ Read [release notes](https://example.com).
 }
 
 MockClient _client(List<Map<String, dynamic>> releases) {
-  return MockClient((request) async => http.Response(jsonEncode(releases), 200, headers: {'content-type': 'application/json'}));
+  return MockClient((request) async {
+    expect(request.url.path.endsWith('/releases'), isTrue);
+    return http.Response(jsonEncode(releases), 200, headers: {'content-type': 'application/json'});
+  });
+}
+
+MockClient _latestClient(Map<String, dynamic> release) {
+  return MockClient((request) async {
+    expect(request.url.path.endsWith('/releases/latest'), isTrue);
+    return http.Response(jsonEncode(release), 200, headers: {'content-type': 'application/json'});
+  });
 }
 
 Map<String, dynamic> _release(

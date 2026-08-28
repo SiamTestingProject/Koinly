@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.0.1037] - 2026-08-28
+
+### Changed
+
+- Worker changes in `SiamTestingProject/Koinly` now automatically deploy the
+  Owner/Default sync Worker, while the owner deployment job is always skipped
+  in forks.
+- Worker changes in fork repositories now automatically deploy the User
+  Self-hosted sync Worker, while automatic original-repository pushes skip the
+  self-hosted deployment job.
+- Manual self-hosted deployment remains available in any repository; manual
+  owner deployment remains restricted to the original repository.
+
+## [1.0.1036] - 2026-08-28
+
+### Fixed
+
+- Stable update checks now use GitHub's designated Latest release, preventing
+  the older `1.0.1035` tag from replacing newer releases such as `1.0.77` in
+  the update dialog.
+- Prerelease checks preserve GitHub's release-feed order instead of sorting
+  historical tags by their numeric semantic version.
+
+### Changed
+
+- Restored monotonically increasing release versioning at `1.0.1036` so apps
+  using the previous updater can discover and install this correction.
+
+## [1.0.78] - 2026-08-28
+
+### Changed
+
+- Android APK/AAB and Windows installer jobs now run automatically only in the
+  original `SiamTestingProject/Koinly` repository. Fork owners can still start
+  artifact builds manually.
+- Stable GitHub Release publishing is restricted to the original repository,
+  including manually dispatched builds.
+
 ## [1.0.77] - 2026-08-28
 
 ### Fixed

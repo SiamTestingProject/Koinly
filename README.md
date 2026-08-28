@@ -196,7 +196,7 @@ unavailable.
 
 ```bash
 flutter build apk --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.77 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1037 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -208,7 +208,7 @@ or test builds; see [Android signing](#android-signing).
 
 ```bash
 flutter build windows --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.77 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1037 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -429,19 +429,35 @@ again after the rotation.
 
 | Workflow | Trigger | Output |
 | --- | --- | --- |
-| `deploy-sync-worker.yml` | Manual; changes to Worker or workflow on `main`/`master` | User-owned Worker in first-user registration mode |
-| `deploy-owner-sync-worker.yml` | Manual only | Owner/default-service Worker in invite-key mode with Telegram key delivery |
-| `build-android-apks.yml` | Manual; app changes on `main`/`master` | Android APK/AAB files, Windows installer, and stable GitHub Release |
+| `deploy-sync-worker.yml` | Manual everywhere; automatic Worker changes on `main`/`master` in forks only | User-owned Worker in first-user registration mode |
+| `deploy-owner-sync-worker.yml` | Manual or automatic Worker changes on `main`/`master` in the original repository only | Owner/default-service Worker in invite-key mode with Telegram key delivery |
+| `build-android-apks.yml` | Manual everywhere; app changes on `main`/`master` only in the original repository | Android APK/AAB files, Windows installer, and stable GitHub Release |
+
+Automatic Android and Windows builds run only in
+`SiamTestingProject/Koinly`. Pushes in forks create a skipped Actions entry and
+consume no build runner time. Fork owners can still run **Build Android APKs
+and Windows Installer** manually to produce downloadable build artifacts, but
+the stable GitHub Release publishing job remains restricted to the original
+repository.
+
+Stable in-app update checks use GitHub's designated **Latest** release rather
+than sorting every historical tag numerically. Prerelease-enabled builds follow
+GitHub's release feed order. Release version names must still increase over
+time; version `1.0.1036` restores monotonic ordering after the historical
+`1.0.1035` tag so existing app versions can discover this updater correction.
 
 ### Separate user and owner deployments
 
-Fork users should run **Deploy User Self-Hosted Sync Worker**. It reads only
-the six `_U` values documented above and creates a first-user backend.
-It never reads Telegram or registration-administrator credentials.
+Fork pushes that change the Worker automatically run **Deploy User Self-Hosted
+Sync Worker**. Fork users can also dispatch it manually. It reads only the six
+`_U` values documented above and creates a first-user backend. It never reads
+Telegram or registration-administrator credentials. The job is skipped for
+automatic pushes in the original repository.
 
-The project owner should run **Deploy Owner Default Sync Worker** for the
-app's managed default service. This workflow is manual-only, so it does not
-run automatically in forks. It uses a separate Worker and database, enables
+Pushes in `SiamTestingProject/Koinly` that change the Worker automatically run
+**Deploy Owner Default Sync Worker** for the app's managed default service. It
+can also be dispatched manually in the original repository, but its job is
+always skipped in forks. It uses a separate Worker and database, enables
 invite-key registration, creates an active registration key, and verifies its
 delivery to Telegram.
 
