@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.1041] - 2026-08-28
+
+### Changed
+
+- Moved Loans from the Home dashboard into the center of the primary bottom
+  navigation, between Analysis and Transactions.
+- Added the same Loans destination to the Windows navigation rail and removed
+  the duplicate Loans card from Home.
+
 ## [1.0.1040] - 2026-08-28
 
 ### Added

@@ -3813,6 +3813,7 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
     final pages = <Widget>[
       const HomeDashboardScreen(),
       const AnalysisScreen(),
+      const LoansScreen(),
       const TransactionListScreen(),
       const CategoriesScreen(),
     ];
@@ -4016,6 +4017,7 @@ class _FloatingDockNavigation extends StatelessWidget {
   static List<_DockDestination> get destinations => [
     const _DockDestination(label: 'Home', icon: Icons.home_outlined, activeIcon: Icons.home_rounded),
     const _DockDestination(label: 'Analysis', icon: Icons.insights_outlined, activeIcon: Icons.insights_rounded),
+    const _DockDestination(label: 'Loans', icon: Icons.currency_exchange_outlined, activeIcon: Icons.currency_exchange_rounded),
     const _DockDestination(label: 'Transaction', icon: Icons.receipt_long_outlined, activeIcon: Icons.receipt_long_rounded),
     const _DockDestination(label: 'Categories', icon: Icons.category_outlined, activeIcon: Icons.category_rounded),
   ];
@@ -5513,24 +5515,6 @@ class HomeDashboardScreen extends StatelessWidget {
       ),
     ];
 
-    final loanOverview = state.loanSummary;
-    final loanSubtitleParts = <String>[
-      if (loanOverview.collectorCount > 0) '${loanOverview.collectorCount} ${loanOverview.collectorCount == 1 ? 'person owes' : 'people owe'} you',
-      if (loanOverview.debtorCount > 0) 'you owe ${loanOverview.debtorCount}',
-      if (loanOverview.overdueCount > 0) '${loanOverview.overdueCount} overdue',
-    ];
-    final loansSection = <Widget>[
-      const SectionHeader('Loans'),
-      HomeNavigationTile(
-        iconName: 'exchange',
-        iconColor: '#FBC879',
-        title: 'Loans',
-        subtitle: loanSubtitleParts.isEmpty ? 'No active loans' : loanSubtitleParts.join(' · '),
-        amount: _signedLoanAmount(state, loanOverview.net),
-        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const LoansScreen())),
-      ),
-    ];
-
     final budgetSection = <Widget>[
       SectionHeader('Budgets', trailing: TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetListScreen())), child: const Text('View all'))),
       if (state.budgets.isEmpty)
@@ -5633,7 +5617,6 @@ class HomeDashboardScreen extends StatelessWidget {
                   balanceCard,
                   ...startEmptySection,
                   ...accountsSection,
-                  ...loansSection,
                   ...budgetSection,
                   ...categorySection,
                 ],
@@ -5649,9 +5632,8 @@ class HomeDashboardScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       balanceCard,
-                          ...startEmptySection,
+                      ...startEmptySection,
                       ...accountsSection,
-                      ...loansSection,
                       ...budgetSection,
                     ],
                   ),
