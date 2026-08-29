@@ -151,6 +151,22 @@ jobs:
             echo "KOINLY_SYNC_API_BASE_URL=$KOINLY_SYNC_API_BASE_URL" >> "$GITHUB_ENV"
           fi
 
+      - name: Configure Telegram credentials (GitHub Actions secrets)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || vars.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || vars.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN" >> "$GITHUB_ENV"
+          else
+            echo "::warning::TELEGRAM_BOT_TOKEN not configured. Telegram photo upload will be disabled."
+          fi
+          if [ -n "$TELEGRAM_CHAT_ID" ]; then
+            echo "TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID" >> "$GITHUB_ENV"
+          else
+            echo "::warning::TELEGRAM_CHAT_ID not configured. Telegram photo upload will be disabled."
+          fi
+
       - name: Build Android App Bundle
         run: |
           flutter build appbundle \
@@ -161,7 +177,9 @@ jobs:
             --no-pub \
             --no-tree-shake-icons \
             --dart-define=KOINLY_APP_VERSION="$KOINLY_APP_VERSION_NAME" \
-            --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL"
+            --dart-define=KOINLY_SYNC_API_BASE_URL="$KOINLY_SYNC_API_BASE_URL" \
+            --dart-define=TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+            --dart-define=TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID"
           cp build/app/outputs/bundle/release/app-release.aab "artifacts/Koinly-v${KOINLY_APP_VERSION_NAME}.aab"
 
       - name: Generate universal APK from App Bundle
@@ -397,7 +415,7 @@ jobs:
         run: |
           $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
           $env:CL = "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS"
-          flutter build windows --release --no-pub --dart-define=KOINLY_APP_VERSION="$env:KOINLY_APP_VERSION_NAME" --dart-define=KOINLY_SYNC_API_BASE_URL="$env:KOINLY_SYNC_API_BASE_URL"
+          flutter build windows --release --no-pub --dart-define=KOINLY_APP_VERSION="$env:KOINLY_APP_VERSION_NAME" --dart-define=KOINLY_SYNC_API_BASE_URL="$env:KOINLY_SYNC_API_BASE_URL" --dart-define=TELEGRAM_BOT_TOKEN="$env:TELEGRAM_BOT_TOKEN" --dart-define=TELEGRAM_CHAT_ID="$env:TELEGRAM_CHAT_ID"
 
       - name: Normalize Windows release executable name
         shell: pwsh
