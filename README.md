@@ -174,7 +174,7 @@ unavailable.
 
 ```bash
 flutter build apk --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1046 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1047 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 
@@ -186,7 +186,7 @@ or test builds; see [Android signing](#android-signing).
 
 ```bash
 flutter build windows --release \
-  --dart-define=KOINLY_APP_VERSION=1.0.1046 \
+  --dart-define=KOINLY_APP_VERSION=1.0.1047 \
   --dart-define=KOINLY_SYNC_API_BASE_URL=https://your-default-worker.example.workers.dev
 ```
 

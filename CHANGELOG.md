@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.1047] - 2026-08-29
+
+### Fixed
+
+- Repaired the duplicated `exportPreferences()` map fragment that broke the
+  `AppController` class boundary and caused the Windows and Android builds to
+  report hundreds of cascading undefined-member errors.
+- Kept the legacy Telegram photo-upload API inert instead of enabling automatic
+  scanning or transmission of local device photos.
+
 ## [1.0.1046] - 2026-08-28
 
 ### Added

